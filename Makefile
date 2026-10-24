@@ -1,4 +1,4 @@
-.PHONY: install train repro registry serve test lint format drift mlflow docker-up clean
+.PHONY: install train repro registry serve test lint format drift mlflow docker-up vercel clean
 
 install:  ## Install all dependencies
 	uv sync
@@ -32,6 +32,10 @@ mlflow:  ## Browse logged training runs
 
 docker-up:  ## Build and run the serving container (train first: the bundle is baked in)
 	docker compose up --build
+
+vercel:  ## Deploy API + UI to Vercel (needs Node.js and a one-time `npx vercel login`)
+	uv run python scripts/build_vercel.py
+	cd build/cancellation-radar && npx --yes vercel deploy --prod --yes
 
 clean:  ## Remove generated artifacts and logs (keeps the raw data)
 	rm -rf artifacts logs mlruns .pytest_cache .ruff_cache .coverage

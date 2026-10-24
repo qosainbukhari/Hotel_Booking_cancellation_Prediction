@@ -3,6 +3,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from xgboost import DMatrix
 
 from hotel_cancellation.config.configuration import ConfigurationManager
 from hotel_cancellation.exception import ModelError
@@ -36,7 +37,6 @@ class PredictionPipeline:
         self.versions = read_json(self.serving_dir / VERSIONS_FILE)
         self.threshold = float(self.metadata["threshold"])
         self._source_columns = self._map_features_to_source()
-        self._explainer = None
 
     @property
     def version(self) -> str:
@@ -49,18 +49,28 @@ class PredictionPipeline:
             index=df.index,
         )
 
+    def _contributions(self, df: pd.DataFrame) -> np.ndarray:
+        """TreeSHAP values per model column plus the bias (last column), in log-odds.
+
+        XGBoost computes exact TreeSHAP itself, so serving does not need the `shap` package
+        (and its ~190 MB of numba/llvmlite). The values equal shap.TreeExplainer's, which a test
+        checks.
+        """
+        X = self.model.named_steps["preprocessor"].transform(df)
+        booster = self.model.named_steps["model"].get_booster()
+        return booster.predict(DMatrix(X), pred_contribs=True)
+
+    def base_value(self, df: pd.DataFrame) -> float:
+        """Log-odds of the average booking (the SHAP base value)."""
+        return float(self._contributions(df.head(1))[0, -1])
+
     def shap_values(self, df: pd.DataFrame) -> pd.DataFrame:
         """SHAP values (log-odds) per source feature, one row per booking.
 
         One-hot columns are summed back into their source feature, so "deposit_type" appears
         once rather than once per deposit type.
         """
-        import shap
-
-        if self._explainer is None:
-            self._explainer = shap.TreeExplainer(self.model.named_steps["model"])
-        X = self.model.named_steps["preprocessor"].transform(df)
-        values = self._explainer.shap_values(X)
+        values = self._contributions(df)[:, :-1]
         return (
             pd.DataFrame(values, columns=self._source_columns, index=df.index)
             .T.groupby(level=0, sort=False)

@@ -51,9 +51,23 @@ def test_shap_values_add_up_to_the_prediction(config_manager, bookings):
     predictor = PredictionPipeline(_serving_dir(config_manager))
     rows = bookings.drop(columns=["is_canceled"]).head(20)
 
-    log_odds = predictor.shap_values(rows).sum(axis=1) + predictor._explainer.expected_value
+    log_odds = predictor.shap_values(rows).sum(axis=1) + predictor.base_value(rows)
     proba = predictor.predict(rows)["cancel_probability"]
     np.testing.assert_allclose(1 / (1 + np.exp(-log_odds)), proba, atol=1e-4)
+
+
+def test_serving_explanations_match_the_shap_package(config_manager, bookings):
+    shap = pytest.importorskip("shap")
+    TrainingPipeline(config_manager).run()
+    predictor = PredictionPipeline(_serving_dir(config_manager))
+    rows = bookings.drop(columns=["is_canceled"]).head(50)
+
+    X = predictor.model.named_steps["preprocessor"].transform(rows)
+    explainer = shap.TreeExplainer(predictor.model.named_steps["model"])
+    np.testing.assert_allclose(
+        predictor._contributions(rows)[:, :-1], explainer.shap_values(X), atol=1e-4
+    )
+    assert predictor.base_value(rows) == pytest.approx(float(explainer.expected_value), abs=1e-4)
 
 
 def test_retraining_without_improvement_keeps_production(config_manager):

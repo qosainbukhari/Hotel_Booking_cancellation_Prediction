@@ -33,6 +33,8 @@ logger = get_logger(__name__)
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
 MAX_BATCH_SIZE = 1000
 MAX_CSV_ROWS = 100_000
+# The JSON summary returns only the riskiest rows (the UI shows 200); the CSV output has all.
+MAX_PREVIEW_ROWS = 500
 # Columns echoed back for each row of a scored CSV so the UI can show which booking it was.
 PREVIEW_COLUMNS = [
     "hotel",
@@ -307,7 +309,8 @@ def predict_csv(
     """Score every booking in a CSV.
 
     `output=csv` returns the uploaded file with `cancel_probability` and `will_cancel` added.
-    With JSON output, metrics are included when the file has an `is_canceled` column.
+    With JSON output, metrics are included when the file has an `is_canceled` column, and
+    `rows` holds the riskiest bookings (up to 500) while the counts cover the whole file.
     """
     results = predictor.predict(df)
 
@@ -326,9 +329,11 @@ def predict_csv(
     rows["will_cancel"] = results["will_cancel"]
 
     metrics = None
+    n_actual_cancel = None
     target = settings.target
     if target in df.columns and df[target].isin([0, 1]).all():
         rows["actual"] = df[target]
+        n_actual_cancel = int(df[target].sum())
         if df[target].nunique() == 2:
             costs = predictor.metadata.get("costs")
             metrics = classification_metrics(
@@ -344,11 +349,16 @@ def predict_csv(
         "threshold": predictor.threshold,
         "n_rows": len(df),
         "n_predicted_cancel": int(results["will_cancel"].sum()),
+        "n_actual_cancel": n_actual_cancel,
         "mean_probability": float(probabilities.mean()),
         "histogram": np.histogram(probabilities, bins=20, range=(0, 1))[0].tolist(),
         "metrics": metrics,
         "warnings": df.attrs.get("warnings", []),
-        "rows": _records(rows),
+        "rows": _records(
+            rows.sort_values("cancel_probability", ascending=False, kind="stable").head(
+                MAX_PREVIEW_ROWS
+            )
+        ),
     }
 
 

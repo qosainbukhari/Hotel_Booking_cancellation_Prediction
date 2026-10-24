@@ -136,3 +136,14 @@ def test_drift_report(client, csv_bytes):
     body = response.json()
     assert body["model_version"] == "1"
     assert body["n_features"] > 0 and "dataset_drift" in body
+
+
+def test_predict_csv_returns_riskiest_rows_with_whole_file_counts(client, bookings):
+    csv_bytes = bookings.to_csv(index=False).encode()  # 1,500 rows
+    body = client.post("/predict/csv", files={"file": ("b.csv", csv_bytes)}).json()
+
+    assert body["n_rows"] == 1500
+    assert len(body["rows"]) == 500
+    assert body["n_actual_cancel"] == int(bookings["is_canceled"].sum())
+    probabilities = [row["cancel_probability"] for row in body["rows"]]
+    assert probabilities == sorted(probabilities, reverse=True)

@@ -4,6 +4,9 @@ Predicts whether a hotel booking will be cancelled, using the
 [Hotel Booking Demand](https://www.sciencedirect.com/science/article/pii/S2352340918315191) dataset
 (119,390 bookings from a city hotel and a resort hotel in Portugal, July 2015 – August 2017).
 
+**Live demo: [cancellation-radar.vercel.app](https://cancellation-radar.vercel.app)**: web UI,
+with the API reference at [/docs](https://cancellation-radar.vercel.app/docs).
+
 The project covers the whole lifecycle: leakage analysis, data validation (Pandera), a DVC
 pipeline, Optuna tuning with baselines, a cost-based decision threshold, the MLflow Model
 Registry, SHAP explanations, drift monitoring (PSI + Evidently), a FastAPI service with a web
@@ -244,6 +247,32 @@ docker compose up --build           # http://localhost:8000
 
 The runtime environment is about 500 MB. `shap` and its `numba`/`llvmlite` dependencies make up
 about 190 MB of that.
+
+## Vercel
+
+The API and web UI run live at **https://cancellation-radar.vercel.app** as a Vercel Function
+(Python 3.12). To redeploy after retraining or code changes:
+
+```bash
+uv run hc-train      # produces the serving bundle
+make vercel          # = scripts/build_vercel.py + `npx vercel deploy --prod` (Node.js + one-time `npx vercel login`)
+```
+
+`scripts/build_vercel.py` stages `build/cancellation-radar/` with:
+
+- the API, UI, configs, package code and serving bundle
+- an `index.py` entrypoint
+- a `requirements.txt` holding only the runtime packages, pinned to the training versions
+
+The repo's own `pyproject.toml` would also pull in the training tools and exceed Vercel's 500 MB
+function limit. The staged bundle is about 290 MB, and serving explanations use XGBoost's
+built-in TreeSHAP (identical to the `shap` package, checked by a test).
+
+Limits on Vercel:
+
+- Uploads are capped at 4.5 MB per request (the 23,878-row test file is 2.6 MB).
+- The filesystem is read-only, so file logs are skipped.
+- The first request after idle has a cold start of a few seconds.
 
 ## Notebook
 

@@ -432,8 +432,8 @@ function renderBatch(data) {
     tile("Flagged to cancel", data.n_predicted_cancel.toLocaleString(), `${pct(flaggedShare)} of bookings`),
     tile("Average risk", pct(data.mean_probability), `threshold ${pct(data.threshold, 0)}`),
   ];
-  if (data.rows.length && "actual" in data.rows[0]) {
-    const actual = data.rows.reduce((sum, row) => sum + row.actual, 0);
+  if (data.n_actual_cancel != null) {
+    const actual = data.n_actual_cancel;
     tiles.push(tile("Actually cancelled", actual.toLocaleString(), `${pct(actual / data.n_rows)} of bookings`));
   }
   if (data.metrics) tiles.push(tile("ROC-AUC", fmt(data.metrics.roc_auc), "on this file"));
@@ -471,7 +471,8 @@ function renderBatchTable() {
   const onlyFlagged = $("#only-flagged").checked;
   let rows = [...batchData.rows].sort((a, b) => b.cancel_probability - a.cancel_probability);
   if (onlyFlagged) rows = rows.filter((row) => row.will_cancel);
-  const total = rows.length;
+  // The API sends only the riskiest rows; the totals come from the whole file.
+  const total = onlyFlagged ? batchData.n_predicted_cancel : batchData.n_rows;
   rows = rows.slice(0, TABLE_LIMIT);
   const hasActual = rows.length > 0 && "actual" in rows[0];
 

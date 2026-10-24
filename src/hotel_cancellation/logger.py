@@ -8,7 +8,10 @@ LOG_FILE = LOG_DIR / "running.log"
 
 
 def get_logger(name: str, level: str = "INFO") -> logging.Logger:
-    """Return a logger that writes to the terminal and to logs/running.log."""
+    """Return a logger that writes to the terminal and, where possible, to logs/running.log.
+
+    On read-only hosts (serverless platforms such as Vercel) the file log is skipped.
+    """
     logger = logging.getLogger(name)
 
     if logger.handlers:
@@ -21,10 +24,14 @@ def get_logger(name: str, level: str = "INFO") -> logging.Logger:
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    except OSError:
+        file_handler = None
+    if file_handler is not None:
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
     logger.propagate = False
     return logger
