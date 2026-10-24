@@ -18,7 +18,6 @@ const FORM_GROUPS = [
     { name: "adults", label: "Adults", type: "number" },
     { name: "children", label: "Children", type: "number" },
     { name: "babies", label: "Babies", type: "number" },
-    { name: "country", label: "Country", type: "text", help: "ISO code, e.g. PRT, GBR, FRA", list: "countries" },
     { name: "customer_type", label: "Customer type", type: "select" },
   ]],
   ["Booking channel", [
@@ -33,7 +32,6 @@ const FORM_GROUPS = [
     { name: "reserved_room_type", label: "Room type", type: "select" },
     { name: "meal", label: "Meal plan", type: "select" },
     { name: "adr", label: "Average daily rate (€)", type: "number", step: "0.01" },
-    { name: "required_car_parking_spaces", label: "Parking spaces", type: "number" },
     { name: "total_of_special_requests", label: "Special requests", type: "number" },
   ]],
   ["Guest history", [
@@ -49,26 +47,24 @@ const OPTION_LABELS = {
 };
 // Room types have no fixed list in the API (the model groups rare ones), so list the known ones.
 const ROOM_TYPES = ["A", "B", "C", "D", "E", "F", "G", "H", "L", "P"];
-const COUNTRIES = ["PRT", "GBR", "FRA", "ESP", "DEU", "ITA", "IRL", "BEL", "BRA", "NLD", "USA",
-  "CHE", "AUT", "SWE", "CHN", "POL", "ISR", "RUS", "NOR"];
 
 const BASE_BOOKING = {
   hotel: "City Hotel", arrival_date: "2017-08-15", lead_time: 120,
   stays_in_weekend_nights: 1, stays_in_week_nights: 3,
-  adults: 2, children: 0, babies: 0, country: "PRT", customer_type: "Transient",
+  adults: 2, children: 0, babies: 0, customer_type: "Transient",
   market_segment: "Online TA", distribution_channel: "TA/TO", deposit_type: "No Deposit",
   agent: 9, company: "", days_in_waiting_list: 0,
   reserved_room_type: "A", meal: "BB", adr: 110.5,
-  required_car_parking_spaces: 0, total_of_special_requests: 1,
+  total_of_special_requests: 1,
   is_repeated_guest: 0, previous_cancellations: 0, previous_bookings_not_canceled: 0,
 };
 
 const PRESETS = {
   safe: {
     ...BASE_BOOKING, hotel: "Resort Hotel", arrival_date: "2017-07-08", lead_time: 12,
-    stays_in_weekend_nights: 2, stays_in_week_nights: 5, children: 1, country: "GBR",
+    stays_in_weekend_nights: 2, stays_in_week_nights: 5, children: 1,
     market_segment: "Direct", distribution_channel: "Direct", agent: "", adr: 145,
-    required_car_parking_spaces: 1, total_of_special_requests: 2, is_repeated_guest: 1,
+    total_of_special_requests: 2, is_repeated_guest: 1,
     previous_bookings_not_canceled: 2, meal: "HB", reserved_room_type: "E",
   },
   risky: {
@@ -87,8 +83,8 @@ const FEATURE_LABELS = {
   total_guests: "Party size", is_repeated_guest: "Returning guest",
   previous_cancellations: "Past cancellations", previous_bookings_not_canceled: "Past completed stays",
   days_in_waiting_list: "Waiting list", adr: "Daily rate", adr_per_guest: "Rate per guest",
-  required_car_parking_spaces: "Parking", total_of_special_requests: "Special requests",
-  has_company: "Company booking", hotel: "Hotel", meal: "Meal plan", country: "Country",
+  total_of_special_requests: "Special requests",
+  has_company: "Company booking", hotel: "Hotel", meal: "Meal plan",
   market_segment: "Market segment", distribution_channel: "Channel",
   reserved_room_type: "Room type", deposit_type: "Deposit", customer_type: "Customer type",
   agent: "Travel agent",
@@ -209,7 +205,7 @@ async function refreshStatus() {
     modelLoaded = health.model_loaded;
     status.className = `status ${modelLoaded ? "ok" : "bad"}`;
     $("#status-text").textContent = modelLoaded
-      ? `Model ${health.model_version} live`
+      ? `Model v${health.model_version} live`
       : "No model loaded — run hc-train";
   } catch (error) {
     modelLoaded = false;
@@ -233,7 +229,6 @@ async function buildForm() {
   };
 
   const container = $("#form-groups");
-  container.append(el("datalist", { id: "countries" }, COUNTRIES.map((c) => el("option", { value: c }))));
 
   for (const [title, fields] of FORM_GROUPS) {
     const grid = el("div", { class: "fields" });
@@ -251,9 +246,7 @@ async function buildForm() {
           input.step = field.step ?? "1";
           input.inputMode = field.step ? "decimal" : "numeric";
         }
-        if (field.list) input.setAttribute("list", field.list);
-        if (field.type === "text") { input.maxLength = 3; input.autocapitalize = "characters"; }
-        if (!field.optional && field.name !== "country") input.required = true;
+        if (!field.optional) input.required = true;
         if (field.optional) input.placeholder = "None";
       }
       grid.append(el("div", { class: "field", "data-field": field.name },
@@ -281,8 +274,6 @@ function readForm() {
       if (field.type === "date") continue;
       if (field.type === "number" || field.name === "is_repeated_guest") {
         booking[field.name] = raw === "" ? (field.optional ? null : NaN) : Number(raw);
-      } else if (field.name === "country") {
-        booking.country = raw === "" ? null : raw.toUpperCase();
       } else {
         booking[field.name] = raw;
       }
@@ -335,7 +326,7 @@ function renderPrediction(result) {
   verdict.className = `verdict ${result.will_cancel ? "risk" : "safe"}`;
   verdict.textContent = result.will_cancel ? "Likely to cancel" : "Likely to show up";
   $("#threshold-note").textContent =
-    `Flagged above ${pct(result.threshold, 0)} (the tick on the dial) · model ${result.model_version}`;
+    `Flagged above ${pct(result.threshold, 0)} (the tick on the dial), the cost-optimal cut-off · model v${result.model_version}`;
 
   const rows = result.explanation ?? [];
   const maxAbs = Math.max(...rows.map((r) => Math.abs(r.contribution)), 0.01);
@@ -446,6 +437,10 @@ function renderBatch(data) {
     tiles.push(tile("Actually cancelled", actual.toLocaleString(), `${pct(actual / data.n_rows)} of bookings`));
   }
   if (data.metrics) tiles.push(tile("ROC-AUC", fmt(data.metrics.roc_auc), "on this file"));
+  if (data.metrics?.cost_saving != null) {
+    tiles.push(tile("Cost saved", pct(data.metrics.cost_saving, 0),
+      `€${fmt(data.metrics.cost_per_booking, 2)} per booking vs no model`));
+  }
   $("#batch-tiles").replaceChildren(...tiles);
 
   // Histogram
@@ -559,7 +554,7 @@ function renderDrift(report) {
     el("span", { class: "muted" },
       `${report.drifted_features.length} of ${report.n_features} features drifted ` +
       `(${pct(report.drift_share, 0)}; limit ${pct(report.drift_share_threshold, 0)}) · ` +
-      `${report.n_rows.toLocaleString()} rows compared with the training data of model ${report.model_version}`));
+      `${report.n_rows.toLocaleString()} rows compared with the training data of model v${report.model_version}`));
 
   const features = Object.entries(report.features).sort((a, b) => b[1].psi - a[1].psi);
   const threshold = report.psi_threshold;
@@ -601,8 +596,9 @@ async function loadModel() {
       api("/model/versions").then((r) => r.json()),
     ]);
     const trained = info.trained_at ? new Date(info.trained_at).toLocaleString() : "unknown";
-    $("#model-title").textContent = `Production model ${info.version}`;
-    $("#model-sub").textContent = `Trained ${trained} · ${info.n_features} model features · XGBoost`;
+    $("#model-title").textContent = `Production model v${info.version}`;
+    $("#model-sub").textContent =
+      `Trained ${trained} · XGBoost, ${info.n_trees} trees, ${info.n_features} model features · MLflow registry`;
     const m = info.test_metrics ?? {};
     $("#model-tiles").replaceChildren(
       tile("ROC-AUC", fmt(m.roc_auc), "held-out test set"),
@@ -610,18 +606,21 @@ async function loadModel() {
       tile("F1 score", fmt(m.f1)),
       tile("Precision", fmt(m.precision), "flagged that did cancel"),
       tile("Recall", fmt(m.recall), "cancellations caught"),
-      tile("Threshold", pct(info.threshold, 1), "tuned for F1"));
+      tile("Threshold", pct(info.threshold, 1), "minimises cost"),
+      tile("Cost / booking", `€${fmt(m.cost_per_booking, 2)}`,
+        info.costs ? `missed €${info.costs.false_negative} · false alarm €${info.costs.false_positive}` : ""));
 
-    const head = el("tr", {}, ["Version", "Registered", "ROC-AUC", "PR-AUC", "F1", "Replaced", "Status"]
-      .map((h, i) => el("th", { class: i >= 2 && i <= 4 ? "num" : "" }, h)));
+    const head = el("tr", {}, ["Version", "Registered", "ROC-AUC", "PR-AUC", "F1", "Cost / booking", "Status"]
+      .map((h, i) => el("th", { class: i >= 2 && i <= 5 ? "num" : "" }, h)));
+    const metric = (v, key, digits = 3) => (v.test_metrics[key] == null ? "—" : fmt(v.test_metrics[key], digits));
     const rows = [...registry.versions].reverse().map((v) => el("tr", {},
-      el("td", {}, el("b", {}, v.version)),
+      el("td", {}, el("b", {}, `v${v.version}`)),
       el("td", {}, new Date(v.registered_at).toLocaleString()),
-      el("td", { class: "num" }, fmt(v.test_metrics.roc_auc)),
-      el("td", { class: "num" }, fmt(v.test_metrics.pr_auc)),
-      el("td", { class: "num" }, fmt(v.test_metrics.f1)),
-      el("td", {}, v.replaced ?? "—"),
-      el("td", {}, v.version === registry.production
+      el("td", { class: "num" }, metric(v, "roc_auc")),
+      el("td", { class: "num" }, metric(v, "pr_auc")),
+      el("td", { class: "num" }, metric(v, "f1")),
+      el("td", { class: "num" }, v.test_metrics.cost_per_booking == null ? "—" : `€${metric(v, "cost_per_booking", 2)}`),
+      el("td", {}, v.is_production
         ? el("span", { class: "pill safe" }, "Production")
         : el("span", { class: "pill neutral" }, "Archived"))));
     $("#versions-table").replaceChildren(el("thead", {}, head), el("tbody", {}, rows));

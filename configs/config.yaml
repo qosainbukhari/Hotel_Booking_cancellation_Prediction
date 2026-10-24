@@ -18,4 +18,9 @@ model_evaluation:
   root_dir: artifacts/model_evaluation
 
 model_registry:
-  root_dir: artifacts/model_registry
+  # Name of the model in the MLflow Model Registry; the live version carries the alias below.
+  registered_model_name: hotel-cancellation
+  production_alias: production
+  # The production version is exported here as a small bundle the API and Docker image load,
+  # so serving never needs MLflow.
+  serving_dir: artifacts/serving

@@ -13,6 +13,7 @@ class DataValidationArtifact:
     is_valid: bool
     report_path: Path
     reference_profile_path: Path
+    evidently_report_path: Path
     dataset_drift: bool
 
 
@@ -28,6 +29,7 @@ class ModelTrainerArtifact:
     metadata_path: Path
     threshold: float
     validation_metrics: dict[str, float]
+    baseline_paths: dict[str, Path]
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,7 @@ class ModelEvaluationArtifact:
     metrics_path: Path
     metrics: dict[str, float]
     production_metrics: dict[str, float] | None
+    baseline_metrics: dict[str, dict[str, float]]
     is_accepted: bool
     reason: str
 
@@ -43,4 +46,4 @@ class ModelEvaluationArtifact:
 class ModelRegistryArtifact:
     promoted: bool
     version: str | None
-    model_dir: Path | None
+    serving_dir: Path | None

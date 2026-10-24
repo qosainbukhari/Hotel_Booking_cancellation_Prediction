@@ -73,6 +73,10 @@ def schema() -> dict:
 @pytest.fixture
 def config_manager(tmp_path: Path, bookings: pd.DataFrame) -> ConfigurationManager:
     """A ConfigurationManager whose data and artifacts all live in a temp directory."""
+    return make_config(tmp_path, bookings)
+
+
+def make_config(tmp_path: Path, bookings: pd.DataFrame) -> ConfigurationManager:
     raw_path = tmp_path / "data" / "hotel_bookings.csv"
     raw_path.parent.mkdir(parents=True)
     bookings.to_csv(raw_path, index=False)
@@ -88,16 +92,26 @@ def config_manager(tmp_path: Path, bookings: pd.DataFrame) -> ConfigurationManag
                 "data_transformation",
                 "model_trainer",
                 "model_evaluation",
-                "model_registry",
             )
+        },
+        "model_registry": {
+            "registered_model_name": "hotel-cancellation-test",
+            "production_alias": "production",
+            "serving_dir": str(artifacts / "serving"),
         },
     }
     params = yaml.safe_load((PROJECT_ROOT / "configs" / "params.yaml").read_text())
     params["model"].update(n_estimators=100, max_depth=3, n_jobs=1)
     params["training"]["early_stopping_rounds"] = 20
+    params["tuning"].update(n_trials=2, early_stopping_rounds=10)
+    params["baselines"]["random_forest"]["n_estimators"] = 20
     params["preprocessing"]["min_category_frequency"] = 5
+    params["data_validation"]["evidently_sample_size"] = 300
     params["evaluation"]["min_roc_auc"] = 0.6
-    params["mlflow"]["enabled"] = False
+    params["mlflow"].update(
+        tracking_uri=f"sqlite:///{tmp_path / 'mlruns' / 'mlflow.db'}",
+        artifact_root=str(tmp_path / "mlruns" / "artifacts"),
+    )
 
     paths = {}
     for name, content in (("config", config), ("params", params)):

@@ -4,18 +4,19 @@ Predicts whether a hotel booking will be cancelled, using the
 [Hotel Booking Demand](https://www.sciencedirect.com/science/article/pii/S2352340918315191) dataset
 (119,390 bookings from a city hotel and a resort hotel in Portugal, July 2015 – August 2017).
 
-The project covers the whole lifecycle: data validation, training, evaluation against the live
-model, a versioned model registry, drift monitoring, a REST API and a web UI. It also ships with
-Docker and CI.
+The project covers the whole lifecycle: leakage analysis, data validation (Pandera), a DVC
+pipeline, Optuna tuning with baselines, a cost-based decision threshold, the MLflow Model
+Registry, SHAP explanations, drift monitoring (PSI + Evidently), a FastAPI service with a web
+UI, a multi-stage Docker image and CI.
 
 ![Single booking prediction with explanation](docs/images/predict.png)
 
 ## Quick start
 
 ```bash
-uv sync                      # install
-# put the dataset at data/raw/hotel_bookings.csv
-uv run hc-train              # train, evaluate, register the model
+uv sync                      # install (runtime + dev + train groups)
+# put the dataset at data/raw/hotel_bookings.csv (tracked by DVC; see below)
+uv run hc-train              # train, evaluate, register in MLflow, export the serving bundle
 uv run uvicorn api.main:app  # open http://127.0.0.1:8000
 ```
 
@@ -23,108 +24,163 @@ Or use `make install train serve`.
 
 ## Results
 
-On the held-out test set (the most recent 20% of arrivals, 23,878 bookings from 22 Apr 2017):
+Test set: the most recent 20% of arrivals (23,878 bookings from 22 Apr 2017). Every model is fit
+on older bookings, has its threshold chosen on the newest 15% of the training data, and is
+refit on all training rows before being scored once on the test set.
 
-| Metric    | Value |
-|-----------|-------|
-| ROC-AUC   | 0.875 |
-| PR-AUC    | 0.834 |
-| F1        | 0.738 |
-| Precision | 0.766 |
-| Recall    | 0.711 |
-| Accuracy  | 0.793 |
+| Model | ROC-AUC | PR-AUC | F1 | Cost / booking |
+|-------|--------:|-------:|---:|---------------:|
+| **XGBoost, Optuna-tuned (production)** | **0.824** | 0.795 | 0.668 | €9.69 |
+| Random Forest | 0.829 | 0.798 | 0.672 | €9.65 |
+| Logistic Regression | 0.799 | 0.728 | 0.638 | €10.87 |
+| *No model (flag nothing)* | | | | *€40.86* |
 
-The decision threshold (≈0.29) is tuned for F1 on a validation slice, not on the test set.
+At the cost-optimal threshold (0.12), the production model catches 94% of cancellations
+(precision 52%) and cuts the cost of mistakes by **76%** compared with doing nothing.
 
-These numbers are lower than the ~0.95 AUC often quoted for this dataset. That is on purpose:
+**Why these numbers are lower than the ~0.95 often quoted for this dataset:**
 
-- **No leakage.** `reservation_status` and `reservation_status_date` encode the answer directly,
-  and `assigned_room_type` and `booking_changes` keep changing up to check-in or cancellation.
-  All four are dropped as soon as the data is loaded.
-- **Temporal split.** The model is trained on older bookings and tested on newer ones, as it
-  would be used in practice. A random split mixes future bookings into training and
-  overstates accuracy.
+| Setup (same quick XGBoost model) | Test ROC-AUC |
+|----------------------------------|-------------:|
+| Random split, check-in columns kept | 0.954 |
+| Random split, no leakage | 0.906 |
+| Time split, check-in columns kept | 0.891 |
+| **Time split, no leakage (this project)** | **0.827** |
+
+- **Leakage.** Six columns are only filled in at check-in or after a cancellation, and they are
+  dropped at ingestion. Two of them were proven from the data:
+  - **`required_car_parking_spaces`:** 7,416 bookings requested parking and **none** cancelled.
+    Parking is recorded on arrival.
+  - **`country`:** no-shows (who never checked in) are 63% Portuguese, like cancellations (62%).
+    Checked-out guests are only 28% Portuguese. Within Offline TA/TO, non-Portuguese bookings
+    cancel 1.6% of the time against 67.8% for Portuguese ones. Country is confirmed at
+    check-in, and PRT is left as the default otherwise.
+- **Temporal split.** The model scores future bookings, so it is tested on later arrivals. A
+  random split overstates ROC-AUC by about 0.08.
+
+**Why XGBoost?** Both tree models clearly beat Logistic Regression. Random Forest and tuned
+XGBoost are within 0.005 ROC-AUC and €0.05 per booking of each other. XGBoost stays in
+production because it is faster and the SHAP code is built around it. Picking the winner on
+the test set would bias the test score, so the fair next step is to compare them with
+time-based cross-validation. All models lose 0.03–0.04 ROC-AUC from validation to test, because
+the test months (spring and summer 2017) cancel more (40.9% against 36.1%).
+
+The full analysis with charts is in
+[`notebooks/project_walkthrough.ipynb`](notebooks/project_walkthrough.ipynb).
+
+## The decision threshold: cost, not F1
+
+"Why 0.12 and not 0.5?" Flagged bookings get a retention action (a reminder call, a
+confirmation request or a small incentive), and confirmed-risk rooms can be resold. The two
+mistakes cost different amounts (`configs/params.yaml` → `threshold`):
+
+| Mistake | Assumed cost | Reasoning |
+|---------|-------------:|-----------|
+| Missed cancellation (false negative) | €100 | Room likely left empty for a night (mean ADR ≈ €100) |
+| False alarm (false positive) | €20 | Retention action spent on a guest who would have come |
+
+The threshold minimises expected cost on the validation slice. With a 5:1 cost ratio it is low:
+the model flags anything with moderate risk. If the action were expensive (say, overbooking with
+a risk of relocating guests), the false-alarm cost rises and the threshold moves up. These
+costs are assumptions to agree with the business. Change them and retrain, and the threshold
+follows.
+
+## How it works
+
+```
+data/raw/hotel_bookings.csv  (tracked by DVC)
+        │
+  ingest ──► validate ──► transform ──► train ──► evaluate ──► MLflow Model Registry
+  drop leaks   Pandera       features      Optuna     test set      version N  @production
+  time split   PSI profile   one-hot       baselines  vs production       │
+               Evidently                   cost threshold                 ▼ export
+                                                                   artifacts/serving/
+                                                                          │
+                                         FastAPI + web UI  ◄──────────────┘  (no MLflow needed)
+```
+
+1. **Ingest:** drops the leakage columns, sorts by arrival date, and keeps the newest 20% as the
+   test set.
+2. **Validate:** Pandera checks every column against `schema.yaml`. Missing columns or wrong
+   types fail the run. Rows that break a range or allowed-value rule only cause a warning until
+   they exceed 1% of rows. This stage also saves a PSI reference profile and an Evidently HTML
+   drift report (`artifacts/data_validation/drift_report.html`).
+3. **Transform:** derives features (`total_nights`, `total_guests`, `adr_per_guest`,
+   `arrival_weekday`, `has_company`, …) and one-hot encodes categories. Rare categories are
+   grouped, so unseen agents don't break scoring.
+4. **Train:**
+   1. Optuna searches the XGBoost hyper-parameters on the validation slice (30 trials).
+   2. Early stopping picks the number of trees.
+   3. The threshold is chosen by cost, and the model is refit on all training rows.
+   4. The Logistic Regression and Random Forest baselines go through the same steps.
+5. **Evaluate + register:** scores the candidate, the baselines and the current production model
+   on the same test set. The candidate is registered in MLflow and gets the `@production` alias
+   only if its ROC-AUC is ≥ 0.75 and beats production by ≥ 0.002. The production version is
+   then exported to `artifacts/serving/`. `--force-promote` overrides the comparison, for
+   example after removing leaky features, when the old cheating model would otherwise always
+   win.
+
+The saved model is one sklearn `Pipeline` (feature engineering → encoding → XGBoost) that takes
+raw booking rows. Training and serving share the same code.
+
+### Why each tool
+
+| Tool | Used for | Why |
+|------|----------|-----|
+| **Pandera** | Schema validation | Rules live in `schema.yaml`; Pandera reports every failing row, so small data errors warn and large ones fail |
+| **DVC** | Data versioning + pipeline | The raw CSV is versioned outside Git. `dvc repro` reruns only the stages whose code, params or data changed |
+| **Optuna** | Hyper-parameter search | TPE search with early stopping per trial, reproducible with a fixed seed |
+| **Baselines** | LogReg, Random Forest | Measured evidence for the model choice |
+| **MLflow** | Tracking + Model Registry | Every run's params, metrics and reports are logged. Versions, `@production` alias and metric tags give one place to promote or roll back |
+| **SHAP** | Explanations | `TreeExplainer` values add up exactly to the model output. The notebook has beeswarm and waterfall plots |
+| **PSI** (custom) | Drift checks in the API and CLI | Tiny, fast, works from a stored profile without the training data |
+| **Evidently** | Drift report for people | A rich HTML report per training run, logged to MLflow |
+
+MLflow stores the model with **skops** (not pickle), which only loads explicitly trusted types.
+A tampered model file can't run arbitrary code.
 
 ## Project layout
 
 ```
-configs/
-  config.yaml          file locations
-  params.yaml          split sizes, model hyper-parameters, acceptance rules, drift thresholds
-  schema.yaml          expected columns, value rules, leakage columns, model features
+configs/            config.yaml (paths, registry), params.yaml (all tunables), schema.yaml
 src/hotel_cancellation/
-  components/
-    data_ingestion.py       load raw CSV, drop leakage columns, temporal train/test split
-    data_validation.py      schema checks, reference profile, train→test drift report
-    data_transformation.py  feature engineering + encoding (sklearn Pipeline)
-    model_trainer.py        XGBoost with early stopping, F1-optimal threshold
-    model_evaluation.py     test metrics, comparison with the production model
-    model_registry.py       file-based registry with versions and a production pointer
-  monitoring/drift.py       PSI drift detection (library + `hc-drift` CLI)
-  pipeline/
-    training_pipeline.py    runs all stages (`hc-train`)
-    prediction_pipeline.py  loads the production model, predicts and explains
-  config/configuration.py   turns YAML into typed config objects
-  entity/                   dataclasses for stage configs and outputs
-api/main.py                 FastAPI service (JSON API + serves the web UI)
-frontend/                   web UI: plain HTML/CSS/JS, no build step, no CDN
-notebooks/
-  project_walkthrough.ipynb EDA, leakage/split experiment, test curves, explanations, drift
-tests/                      unit, API and end-to-end tests (synthetic data, no CSV needed)
-Dockerfile, docker-compose.yml, Makefile, .github/workflows/ci.yml
+  components/       data_ingestion, data_validation, data_transformation,
+                    model_trainer, model_evaluation, model_registry (MLflow)
+  pipeline/         training_pipeline (hc-train, stages), prediction_pipeline (serving)
+  monitoring/       drift.py (PSI + hc-drift CLI)
+  utils/            common helpers, MLflow setup
+api/main.py         FastAPI: JSON API + serves the web UI
+frontend/           web UI (plain HTML/CSS/JS, no build step)
+notebooks/          project_walkthrough.ipynb
+tests/              38 tests: data, drift, pipeline, registry, API (synthetic data)
+dvc.yaml, dvc.lock  pipeline stages and their recorded state
+Dockerfile          multi-stage serving image with the model baked in
 ```
 
-## Setup
-
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+## Training
 
 ```bash
-uv sync
+uv run hc-train                    # all stages in one MLflow run
+uv run hc-train --force-promote    # promote even if it doesn't beat production
+dvc repro                          # rerun only the stages that changed
+dvc dag                            # show the stage graph
+uv run hc-train --stage train      # run a single stage
 ```
 
-Put the dataset at `data/raw/hotel_bookings.csv` (the `data/` folder is not in Git).
+The raw CSV is tracked by DVC (`data/raw/hotel_bookings.csv.dvc`). No DVC remote is configured
+yet. Add one (`dvc remote add -d storage <s3/gdrive/...>`, then `dvc push`), and a fresh clone
+can fetch the data with `dvc pull`.
 
-## Train
+### Model registry
 
 ```bash
-uv run hc-train
+uv run hc-registry list            # versions, test ROC-AUC, which is @production
+uv run hc-registry promote 3       # roll back / forward: move @production, re-export bundle
+uv run hc-registry export          # re-export the current @production version
+make mlflow                        # MLflow UI: runs, metrics, Evidently reports, registry
 ```
 
-The pipeline runs six stages:
-
-1. **Ingestion:** reads the CSV, drops the leakage columns, sorts by arrival date and keeps the
-   newest 20% for testing.
-2. **Validation:** checks every column against `schema.yaml`. Missing columns, wrong types or a
-   bad target fail the run. Rows that break a range or allowed-value rule only cause a warning
-   until they exceed `max_invalid_fraction` (1%). It also saves a reference profile of the
-   training data and reports train→test drift.
-3. **Transformation:** derives features (`total_nights`, `total_guests`, `adr_per_guest`,
-   `arrival_weekday`, `has_company`, …) and one-hot encodes categories. Categories seen fewer
-   than 50 times are grouped into one bucket, so new countries or agents don't break scoring.
-4. **Training:** XGBoost, early-stopped on the newest 15% of the training rows. The same slice is
-   used to pick the decision threshold.
-5. **Evaluation:** scores the candidate on the test set. If a production model exists, it is
-   scored on the same test set.
-6. **Registry:** the candidate is promoted only if its ROC-AUC is ≥ `min_roc_auc` (0.80) and
-   beats production by at least `min_improvement` (0.002).
-
-Outputs go to `artifacts/`:
-
-- `data_validation/validation_report.json`
-- `model_trainer/metadata.json`
-- `model_evaluation/metrics.json`
-- `model_registry/versions/vN/`
-
-Each registered version holds the model, its metadata and its reference profile. Runs are also
-logged to MLflow (`sqlite:///mlruns/mlflow.db`; set `mlflow.enabled: false` in `params.yaml` to
-turn this off). To browse them:
-
-```bash
-uv run mlflow ui --backend-store-uri sqlite:///mlruns/mlflow.db
-```
-
-The saved model is a single sklearn `Pipeline` that takes raw booking rows. Training and serving
-share the same feature code, so they cannot drift apart.
+After a promotion or rollback, press **Reload from registry** in the UI (or `POST /model/reload`).
 
 ## Web UI and API
 
@@ -133,166 +189,100 @@ uv run uvicorn api.main:app --reload
 ```
 
 - **http://127.0.0.1:8000** is the web UI.
-- **http://127.0.0.1:8000/docs** is the interactive API reference.
-
-The UI has four tabs:
+- **http://127.0.0.1:8000/docs** is the API reference.
 
 | Tab | What it does |
 |-----|--------------|
-| **Single booking** | Fill in a booking (or load a low/high-risk preset) to get the cancellation probability on a dial, with the decision threshold marked. Also shows the eight factors that pushed the risk up or down. |
-| **Batch scoring** | Upload a CSV to get summary tiles, the risk distribution and the riskiest bookings, plus a download of the full file with predictions added. If the file has `is_canceled`, it also shows live ROC-AUC, precision, recall and F1. |
-| **Drift monitor** | Upload recent bookings to get PSI per feature against the production model's training data, plus an overall drift verdict. |
-| **Model** | Shows the current version, its test metrics, the full version history, and a button to load a newly promoted model without restarting. |
-
-The form's dropdown options come from the API's OpenAPI schema, so the UI and the API's
-validation always match.
+| **Single booking** | Form (or a low/high-risk preset) to get the cancellation probability on a dial with the threshold marked, plus the eight SHAP factors that pushed it up or down |
+| **Batch scoring** | Upload a CSV to get risk distribution, the riskiest bookings and a CSV download. With `is_canceled` present, also ROC-AUC, precision/recall and the cost saved |
+| **Drift monitor** | Upload recent bookings to get PSI per feature against the production model's training data |
+| **Model** | Live version, test metrics, cost per booking, and MLflow version history |
 
 ![Batch scoring](docs/images/batch.png)
 
-### Endpoints
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | Liveness, and which model version is loaded |
+| GET | `/model` | Version, threshold, costs, test metrics |
+| GET | `/model/versions` | Registry history |
+| POST | `/model/reload` | Load the newest exported bundle without restarting |
+| POST | `/predict` | Score one booking (`?explain=true&top_k=8` adds SHAP factors) |
+| POST | `/predict/batch` | Score up to 1,000 bookings as JSON |
+| POST | `/predict/csv` | Score an uploaded CSV (`?output=csv` returns it with predictions) |
+| POST | `/monitoring/drift` | PSI drift report for an uploaded CSV |
 
-| Method | Path                | Purpose                                                       |
-|--------|---------------------|---------------------------------------------------------------|
-| GET    | `/health`           | Liveness, and whether a model is loaded                       |
-| GET    | `/model`            | Version, training date, threshold, test metrics               |
-| GET    | `/model/versions`   | Registry history and which version is in production           |
-| POST   | `/model/reload`     | Load the current production model after retraining            |
-| POST   | `/predict`          | Score one booking (`?explain=true&top_k=8` adds top drivers)  |
-| POST   | `/predict/batch`    | Score up to 1,000 bookings sent as JSON                       |
-| POST   | `/predict/csv`      | Score an uploaded CSV (≤100k rows); `?output=csv` returns the file with predictions |
-| POST   | `/monitoring/drift` | PSI drift report for an uploaded CSV                          |
+The API accepts only fields known when a booking is made. Leaking fields such as `country`,
+`required_car_parking_spaces` or `reservation_status` are rejected with a 422 error.
 
-```bash
-curl -X POST 'http://127.0.0.1:8000/predict?explain=true' \
-  -H 'content-type: application/json' \
-  -d '{"hotel":"City Hotel","lead_time":120,"arrival_date_year":2017,
-       "arrival_date_month":"August","arrival_date_week_number":33,
-       "arrival_date_day_of_month":15,"stays_in_weekend_nights":1,"stays_in_week_nights":3,
-       "adults":2,"children":0,"babies":0,"meal":"BB","country":"PRT",
-       "market_segment":"Online TA","distribution_channel":"TA/TO","reserved_room_type":"A",
-       "deposit_type":"No Deposit","agent":9,"customer_type":"Transient","adr":110.5,
-       "total_of_special_requests":1}'
-
-curl -F file=@artifacts/data_ingestion/test.csv 'http://127.0.0.1:8000/predict/csv?output=csv' \
-  -o predictions.csv
-```
-
-```json
-{
-  "cancel_probability": 0.2646,
-  "will_cancel": false,
-  "threshold": 0.2947,
-  "model_version": "v1",
-  "explanation": [
-    {"feature": "total_of_special_requests", "value": 1, "contribution": -0.6157},
-    {"feature": "country", "value": "PRT", "contribution": 0.4447},
-    {"feature": "deposit_type", "value": "No Deposit", "contribution": -0.4234},
-    {"feature": "lead_time", "value": 120, "contribution": 0.2652},
-    {"feature": "market_segment", "value": "Online TA", "contribution": 0.159}
-  ]
-}
-```
-
-Explanations are XGBoost's built-in TreeSHAP values in log-odds. One-hot columns are summed back
-into their source feature. Positive values push towards cancellation.
-
-The API rejects invalid input with a 422 error: unknown categories in fixed sets, negative
-counts, leakage fields such as `reservation_status`, and CSVs with missing columns.
-
-## Monitor drift
+## Drift monitoring
 
 ![Drift monitor](docs/images/drift.png)
 
-Use the **Drift monitor** tab, `POST /monitoring/drift`, or the CLI to compare a CSV of new
-bookings with the production model's training distribution:
+Each feature gets a Population Stability Index against the production model's training data.
+A feature counts as drifted above 0.2. The dataset counts as drifted when more than 30% of
+features drift; `hc-drift` then exits with code 1, so it can gate a retraining job.
 
 ```bash
-uv run hc-drift path/to/new_bookings.csv --output drift_report.json
+uv run hc-drift new_bookings.csv --output drift.json
 ```
 
-Each feature gets a Population Stability Index (PSI). A feature counts as drifted above 0.2.
-The dataset counts as drifted when more than 30% of features drift; in that case the command
-exits with code 1, so it can gate a scheduled retraining job.
-
-The train→test check already flags `arrival_month`, `arrival_date_week_number`, `adr`,
-`adr_per_guest`, `agent` and `lead_time`. That is expected: the test window is spring–summer
-2017, so seasonality and price changes show up. It is also the main reason test AUC is lower
-than validation AUC (0.875 vs 0.911).
-
-## Notebook
-
-`notebooks/project_walkthrough.ipynb` walks through the project with code and charts. It is saved
-with its outputs, so you can read it without running anything:
-
-1. **The data:** cancellation rates by hotel, deposit, market segment, lead time and month.
-2. **Leakage and the split:** the same model trained three ways.
-3. **The production model:** ROC and precision/recall curves, confusion matrix, calibration.
-4. **What drives predictions:** global TreeSHAP importance and one booking explained.
-5. **Drift:** PSI between the training and test periods.
-
-The leakage experiment shows what each choice is worth:
-
-| Setup | Test ROC-AUC |
-|-------|-------------:|
-| Random split + leaky columns | 0.954 |
-| Random split, no leakage | 0.948 |
-| Time split, no leakage (this project) | 0.882 |
-
-The calibration plot shows that on the test period, probabilities run low: bookings cancel more
-often than predicted, because of seasonal drift.
-
-To re-run it after `uv run hc-train`:
-
-```bash
-uv run --with jupyterlab jupyter lab notebooks/   # or open it in VS Code with the .venv kernel
-```
-
-It reads the raw data and the trained model but never writes to `artifacts/`.
+The test period drifts in 6 of 28 features, mainly arrival month and week (seasonality), price
+and lead time. It stays under the dataset-level limit.
 
 ## Docker
 
-The image serves the API and UI, with runtime dependencies only. The model registry is mounted
-from the host, so you can retrain without rebuilding:
+The image is multi-stage. The builder stage installs runtime dependencies with uv into a
+virtualenv. The runtime stage copies only that virtualenv, the API, the UI, the configs and the
+**serving bundle**. It has no uv, no source tree and no training tools, and runs as a non-root
+user. Because the model is inside the image, the container runs anywhere (Hugging Face Spaces,
+Cloud Run, …).
 
 ```bash
-uv run hc-train
-docker compose up --build        # http://localhost:8000
+uv run hc-train                     # the build copies artifacts/serving
+docker compose up --build           # http://localhost:8000
 ```
 
-After retraining on the host, press **Reload from registry** in the Model tab, or call
-`POST /model/reload`.
+The runtime environment is about 500 MB. `shap` and its `numba`/`llvmlite` dependencies make up
+about 190 MB of that.
 
-## Make targets
+## Notebook
 
-| Target | Does |
-|--------|------|
-| `make install` | `uv sync` |
-| `make train` | run the training pipeline |
-| `make serve` | API + UI with auto-reload |
-| `make test` | tests with coverage |
-| `make lint` / `make format` | ruff check / fix |
-| `make drift FILE=…` | drift check from the CLI |
-| `make mlflow` | browse training runs |
-| `make docker-up` | build and run the container |
+[`notebooks/project_walkthrough.ipynb`](notebooks/project_walkthrough.ipynb) is saved with its
+outputs. It covers:
+
+- EDA
+- the leakage evidence
+- the four-way split/leakage experiment
+- the baseline comparison
+- the cost curve
+- calibration
+- SHAP plots
+- drift
+
+To re-run it:
+
+```bash
+uv run --with jupyterlab jupyter lab notebooks/
+```
 
 ## Test and lint
 
 ```bash
-make test    # or: uv run pytest
+make test    # 38 tests, ~40 s, each with its own temporary MLflow store
 make lint
 ```
 
-CI (`.github/workflows/ci.yml`) runs lint and tests on every push and pull request. It installs
-only the runtime and dev dependencies; MLflow, Optuna and the other training extras aren't
-needed. Without MLflow installed, `hc-train` still runs and simply skips tracking.
+CI (`.github/workflows/ci.yml`) runs ruff and pytest on every push and pull request.
 
-The tests use synthetic bookings, so they run without the dataset. They cover:
+## Known limitations
 
-- schema validation
-- feature engineering
-- the temporal split
-- drift detection
-- an end-to-end training run, including the "no improvement → keep production" rule
-- the API, including CSV upload, drift and the served UI
-
-Coverage is 88%.
+- **Arrival-date split.** The split is by arrival date, but predictions happen at booking time.
+  A stricter split uses the booking date (arrival minus lead time), so no training booking was
+  made after a test booking.
+- **The non-refundable quirk.** 99% of non-refundable bookings cancelled, which looks like a
+  recording artefact. The model relies on it heavily.
+- **Calibration.** Probabilities run low on the test period because of seasonal drift. Retraining
+  on recent months or a calibration step would fix this.
+- **Assumed costs.** The two costs are assumptions. Agree them with the business before using
+  the flags.
+- **No login.** The API has no authentication.

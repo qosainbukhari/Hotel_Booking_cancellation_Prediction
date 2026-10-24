@@ -4,10 +4,13 @@ target: is_canceled
 # Columns that leak the outcome (they are only known at check-in or after a cancellation).
 # They are dropped right after ingestion so no later stage can use them by accident.
 leakage_columns:
-  - reservation_status
-  - reservation_status_date
-  - assigned_room_type
-  - booking_changes
+  - reservation_status          # is the outcome
+  - reservation_status_date     # date the outcome was recorded
+  - assigned_room_type          # decided at check-in
+  - booking_changes             # keeps counting until check-in / cancellation
+  - required_car_parking_spaces # recorded on arrival: 7,416 bookings with parking, 0 cancelled
+  - country                     # confirmed at check-in, defaults to PRT otherwise: no-shows are
+                                # 63% PRT like cancellations (62%) vs 28% for checked-out guests
 
 # Raw input columns. type is "numeric" or "category"; min / max / allowed are row-level rules.
 columns:
@@ -27,7 +30,6 @@ columns:
   children: {type: numeric, min: 0, nullable: true}
   babies: {type: numeric, min: 0}
   meal: {type: category, allowed: [BB, FB, HB, SC, Undefined]}
-  country: {type: category, nullable: true}
   market_segment:
     type: category
     allowed: [Aviation, Complementary, Corporate, Direct, Groups, Offline TA/TO, Online TA,
@@ -43,7 +45,6 @@ columns:
   days_in_waiting_list: {type: numeric, min: 0}
   customer_type: {type: category, allowed: [Contract, Group, Transient, Transient-Party]}
   adr: {type: numeric, min: 0}
-  required_car_parking_spaces: {type: numeric, min: 0}
   total_of_special_requests: {type: numeric, min: 0}
 
 # Model inputs after feature engineering (see components/data_transformation.py).
@@ -67,13 +68,11 @@ features:
     - days_in_waiting_list
     - adr
     - adr_per_guest
-    - required_car_parking_spaces
     - total_of_special_requests
     - has_company
   categorical:
     - hotel
     - meal
-    - country
     - market_segment
     - distribution_channel
     - reserved_room_type

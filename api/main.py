@@ -22,7 +22,7 @@ from hotel_cancellation.components.data_transformation import FeatureEngineer
 from hotel_cancellation.components.data_validation import validate_dataframe
 from hotel_cancellation.components.model_evaluation import classification_metrics
 from hotel_cancellation.config.configuration import ConfigurationManager
-from hotel_cancellation.entity.config_entity import DataValidationConfig
+from hotel_cancellation.entity.config_entity import CostConfig, DataValidationConfig
 from hotel_cancellation.exception import HotelCancellationError
 from hotel_cancellation.logger import get_logger
 from hotel_cancellation.monitoring.drift import detect_drift
@@ -53,7 +53,11 @@ NonNegative = Annotated[int, Field(ge=0)]
 
 
 class Booking(BaseModel):
-    """One booking, with the same fields as a row of the raw data (minus the outcome)."""
+    """One booking as known when it is made.
+
+    Same fields as a raw data row, minus the outcome and the columns only filled in at
+    check-in (country, parking, assigned room, booking changes), which leak the answer.
+    """
 
     model_config = ConfigDict(
         extra="forbid",
@@ -71,7 +75,6 @@ class Booking(BaseModel):
                 "children": 0,
                 "babies": 0,
                 "meal": "BB",
-                "country": "PRT",
                 "market_segment": "Online TA",
                 "distribution_channel": "TA/TO",
                 "is_repeated_guest": 0,
@@ -84,7 +87,6 @@ class Booking(BaseModel):
                 "days_in_waiting_list": 0,
                 "customer_type": "Transient",
                 "adr": 110.5,
-                "required_car_parking_spaces": 0,
                 "total_of_special_requests": 1,
             }
         },
@@ -102,7 +104,6 @@ class Booking(BaseModel):
     children: NonNegative | None = 0
     babies: NonNegative = 0
     meal: Literal["BB", "FB", "HB", "SC", "Undefined"]
-    country: str | None = Field(default=None, description="ISO 3166-1 alpha-3 code")
     market_segment: Literal[
         "Aviation", "Complementary", "Corporate", "Direct", "Groups",
         "Offline TA/TO", "Online TA", "Undefined",
@@ -118,7 +119,6 @@ class Booking(BaseModel):
     days_in_waiting_list: NonNegative = 0
     customer_type: Literal["Contract", "Group", "Transient", "Transient-Party"]
     adr: Annotated[float, Field(ge=0, description="Average daily rate")]
-    required_car_parking_spaces: NonNegative = 0
     total_of_special_requests: NonNegative = 0
 
 
@@ -214,8 +214,11 @@ def model_info(predictor: Predictor) -> dict:
         "version": predictor.version,
         "trained_at": metadata.get("trained_at"),
         "threshold": predictor.threshold,
+        "threshold_rule": metadata.get("threshold_rule"),
+        "costs": metadata.get("costs"),
         "test_metrics": metadata.get("test_metrics"),
         "n_features": len(metadata.get("feature_names", [])),
+        "n_trees": metadata.get("n_trees"),
     }
 
 
@@ -291,7 +294,7 @@ def _records(df: pd.DataFrame) -> list[dict[str, Any]]:
 @app.get("/model/versions")
 def model_versions(predictor: Predictor) -> dict:
     """Every registered version with its test metrics, and which one is in production."""
-    return predictor.registry.index()
+    return predictor.versions
 
 
 @app.post("/predict/csv")
@@ -327,8 +330,12 @@ def predict_csv(
     if target in df.columns and df[target].isin([0, 1]).all():
         rows["actual"] = df[target]
         if df[target].nunique() == 2:
+            costs = predictor.metadata.get("costs")
             metrics = classification_metrics(
-                df[target].to_numpy(), results["cancel_probability"].to_numpy(), predictor.threshold
+                df[target].to_numpy(),
+                results["cancel_probability"].to_numpy(),
+                predictor.threshold,
+                CostConfig(costs["false_negative"], costs["false_positive"]) if costs else None,
             )
 
     probabilities = results["cancel_probability"].to_numpy()

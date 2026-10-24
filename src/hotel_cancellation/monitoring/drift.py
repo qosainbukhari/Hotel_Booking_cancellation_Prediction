@@ -105,8 +105,8 @@ def detect_drift(
 def main(argv: list[str] | None = None) -> int:
     """CLI: check a CSV of new bookings for drift against the production model's profile."""
     from hotel_cancellation.components.data_transformation import FeatureEngineer
-    from hotel_cancellation.components.model_registry import ModelRegistry
     from hotel_cancellation.config.configuration import ConfigurationManager
+    from hotel_cancellation.pipeline.prediction_pipeline import PROFILE_FILE
     from hotel_cancellation.utils.common import read_json, write_json
 
     parser = argparse.ArgumentParser(description="Check new booking data for drift.")
@@ -120,12 +120,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.profile:
         profile_path = args.profile
     else:
-        registry = ModelRegistry(config.get_model_registry_config())
-        model_dir = registry.production_dir()
-        if model_dir is None:
-            print("No production model registered; pass --profile.", file=sys.stderr)
+        profile_path = config.get_model_registry_config().serving_dir / PROFILE_FILE
+        if not profile_path.exists():
+            print("No serving bundle found; run hc-train or pass --profile.", file=sys.stderr)
             return 2
-        profile_path = model_dir / "reference_profile.json"
 
     current = FeatureEngineer().transform(pd.read_csv(args.current))
     report = detect_drift(

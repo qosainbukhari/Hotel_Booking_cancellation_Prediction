@@ -47,8 +47,8 @@ def test_ingestion_drops_leakage_and_splits_by_time(config_manager):
     artifact = DataIngestion(config_manager.get_data_ingestion_config()).run()
     train, test = pd.read_csv(artifact.train_path), pd.read_csv(artifact.test_path)
 
-    assert "reservation_status" not in train.columns
-    assert "assigned_room_type" not in test.columns
+    for column in ("reservation_status", "assigned_room_type", "country"):
+        assert column not in train.columns and column not in test.columns
     assert len(test) == pytest.approx(0.2 * (len(train) + len(test)), abs=1)
     assert arrival_dates(train).max() <= arrival_dates(test).min()
 
@@ -62,7 +62,7 @@ def test_feature_engineer_derives_features(bookings):
     row = bookings.iloc[[0]].copy()
     row[["stays_in_weekend_nights", "stays_in_week_nights"]] = [2, 3]
     row[["adults", "children", "babies", "adr"]] = [2, np.nan, 0, 100.0]
-    row[["agent", "company", "country"]] = [9.0, np.nan, None]
+    row[["agent", "company", "meal"]] = [9.0, np.nan, None]
 
     out = FeatureEngineer().transform(row).iloc[0]
     assert out["total_nights"] == 5
@@ -70,7 +70,7 @@ def test_feature_engineer_derives_features(bookings):
     assert out["adr_per_guest"] == 50
     assert out["agent"] == "9"
     assert out["has_company"] == 0
-    assert out["country"] == "missing"
+    assert out["meal"] == "missing"
 
 
 def test_preprocessor_handles_unseen_categories(bookings, schema):
@@ -79,6 +79,6 @@ def test_preprocessor_handles_unseen_categories(bookings, schema):
     preprocessor.fit(bookings)
 
     new = bookings.head(2).copy()
-    new["country"] = "ATL"  # never seen in training
+    new["agent"] = 999.0  # never seen in training
     out = preprocessor.transform(new)
     assert out.shape[0] == 2 and not np.isnan(out).any()

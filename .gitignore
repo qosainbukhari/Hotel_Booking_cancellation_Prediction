@@ -1,6 +1,11 @@
 
 # Data, outputs and logs (never in Git)
-data/
+# Raw data is versioned with DVC: Git keeps only the small .dvc pointer files.
+/data/*
+!/data/raw/
+/data/raw/*
+!/data/raw/*.dvc
+!/data/raw/.gitignore
 artifacts/
 mlruns/
 logs/

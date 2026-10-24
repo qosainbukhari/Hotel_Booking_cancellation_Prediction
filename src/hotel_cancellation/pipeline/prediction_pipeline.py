@@ -1,34 +1,46 @@
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from xgboost import DMatrix
 
-from hotel_cancellation.components.model_registry import PROFILE_FILE, ModelRegistry
 from hotel_cancellation.config.configuration import ConfigurationManager
 from hotel_cancellation.exception import ModelError
-from hotel_cancellation.utils.common import read_json
+from hotel_cancellation.utils.common import load_object, read_json
+
+# File names inside the serving bundle (see components/model_registry.py).
+MODEL_FILE = "model.joblib"
+METADATA_FILE = "metadata.json"
+PROFILE_FILE = "reference_profile.json"
+VERSIONS_FILE = "versions.json"
 
 
 class PredictionPipeline:
-    """Score raw booking rows with the production model from the registry."""
+    """Score raw booking rows with the production model's serving bundle.
 
-    def __init__(self, registry: ModelRegistry | None = None) -> None:
-        if registry is None:
-            registry = ModelRegistry(ConfigurationManager().get_model_registry_config())
-        production = registry.load_production()
-        if production is None:
-            raise ModelError("No production model in the registry; run the training pipeline")
-        self.registry = registry
-        self.model, self.metadata = production
-        # Training-data distribution of this model version, used for drift checks.
-        self.reference_profile = read_json(registry.production_dir() / PROFILE_FILE)
+    Only reads files from the bundle folder, so serving needs neither MLflow nor the
+    training data.
+    """
+
+    def __init__(self, serving_dir: Path | None = None) -> None:
+        if serving_dir is None:
+            serving_dir = ConfigurationManager().get_model_registry_config().serving_dir
+        self.serving_dir = Path(serving_dir)
+        if not (self.serving_dir / MODEL_FILE).exists():
+            raise ModelError(
+                f"No serving bundle in {self.serving_dir}; run `uv run hc-train` first"
+            )
+        self.model = load_object(self.serving_dir / MODEL_FILE)
+        self.metadata = read_json(self.serving_dir / METADATA_FILE)
+        self.reference_profile = read_json(self.serving_dir / PROFILE_FILE)
+        self.versions = read_json(self.serving_dir / VERSIONS_FILE)
         self.threshold = float(self.metadata["threshold"])
         self._source_columns = self._map_features_to_source()
+        self._explainer = None
 
     @property
     def version(self) -> str:
-        return self.metadata["version"]
+        return str(self.metadata["version"])
 
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
         proba = self.model.predict_proba(df)[:, 1]
@@ -37,28 +49,29 @@ class PredictionPipeline:
             index=df.index,
         )
 
-    def explain(self, df: pd.DataFrame, top_k: int = 5) -> list[list[dict[str, Any]]]:
-        """Top features pushing each prediction up or down.
+    def shap_values(self, df: pd.DataFrame) -> pd.DataFrame:
+        """SHAP values (log-odds) per source feature, one row per booking.
 
-        Uses XGBoost's built-in TreeSHAP contributions (log-odds). One-hot columns are summed
-        back into their source feature, so "country" is reported once rather than per country.
+        One-hot columns are summed back into their source feature, so "deposit_type" appears
+        once rather than once per deposit type.
         """
-        preprocessor = self.model.named_steps["preprocessor"]
-        booster_model = self.model.named_steps["model"]
-        X = preprocessor.transform(df)
-        contribs = booster_model.get_booster().predict(
-            DMatrix(X),
-            pred_contribs=True,
-            iteration_range=(0, booster_model.best_iteration + 1),
-        )[:, :-1]  # last column is the bias term
+        import shap
 
-        engineered = preprocessor.named_steps["features"].transform(df)
-        grouped = (
-            pd.DataFrame(contribs, columns=self._source_columns)
+        if self._explainer is None:
+            self._explainer = shap.TreeExplainer(self.model.named_steps["model"])
+        X = self.model.named_steps["preprocessor"].transform(df)
+        values = self._explainer.shap_values(X)
+        return (
+            pd.DataFrame(values, columns=self._source_columns, index=df.index)
             .T.groupby(level=0, sort=False)
             .sum()
             .T
         )
+
+    def explain(self, df: pd.DataFrame, top_k: int = 5) -> list[list[dict[str, Any]]]:
+        """Top features pushing each prediction up (towards cancelling) or down."""
+        grouped = self.shap_values(df)
+        engineered = self.model.named_steps["preprocessor"].named_steps["features"].transform(df)
         explanations = []
         for row in range(len(df)):
             values = grouped.iloc[row]
@@ -79,15 +92,13 @@ class PredictionPipeline:
         columns = self.model.named_steps["preprocessor"].named_steps["columns"]
         sources: list[str] = []
         for name, transformer, input_columns in columns.transformers_:
-            if name == "remainder" or transformer == "drop":
+            if name == "remainder":
                 continue
             if hasattr(transformer, "categories_"):
-                for column, names in zip(
-                    input_columns,
-                    _onehot_groups(transformer, input_columns),
-                    strict=True,
+                for column, count in zip(
+                    input_columns, _onehot_groups(transformer, input_columns), strict=True
                 ):
-                    sources.extend([column] * names)
+                    sources.extend([column] * count)
             else:
                 sources.extend(input_columns)
         return sources

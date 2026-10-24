@@ -3,8 +3,8 @@ services:
     build: .
     ports:
       - "8000:8000"
-    volumes:
-      # The model registry produced by `uv run hc-train`. Retrain on the host, then press
-      # "Reload from registry" in the UI (or POST /model/reload) to pick up the new version.
-      - ./artifacts/model_registry:/app/artifacts/model_registry:ro
     restart: unless-stopped
+    # The model is baked into the image. To try a newly exported bundle without rebuilding,
+    # uncomment the volume, then press "Reload from registry" in the UI.
+    # volumes:
+    #   - ./artifacts/serving:/app/artifacts/serving:ro

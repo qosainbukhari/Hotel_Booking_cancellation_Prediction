@@ -1,0 +1,75 @@
+# Training pipeline as DVC stages. `dvc repro` reruns only the stages whose code, config keys
+# or input data changed; `dvc dag` shows the graph. Each stage calls the same code as
+# `uv run hc-train`, one stage at a time.
+stages:
+  ingest:
+    cmd: uv run hc-train --stage ingest
+    deps:
+      - data/raw/hotel_bookings.csv
+      - src/hotel_cancellation/components/data_ingestion.py
+      - configs/schema.yaml
+    params:
+      - configs/params.yaml:
+          - data_split.test_size
+    outs:
+      - artifacts/data_ingestion
+
+  validate:
+    cmd: uv run hc-train --stage validate
+    deps:
+      - artifacts/data_ingestion
+      - src/hotel_cancellation/components/data_validation.py
+      - src/hotel_cancellation/monitoring/drift.py
+      - configs/schema.yaml
+    params:
+      - configs/params.yaml:
+          - data_validation
+          - monitoring
+    outs:
+      - artifacts/data_validation
+
+  transform:
+    cmd: uv run hc-train --stage transform
+    deps:
+      - artifacts/data_ingestion
+      - src/hotel_cancellation/components/data_transformation.py
+      - configs/schema.yaml
+    params:
+      - configs/params.yaml:
+          - preprocessing
+    outs:
+      - artifacts/data_transformation
+
+  train:
+    cmd: uv run hc-train --stage train
+    deps:
+      - artifacts/data_ingestion
+      - artifacts/data_transformation
+      - src/hotel_cancellation/components/model_trainer.py
+    params:
+      - configs/params.yaml:
+          - data_split.validation_size
+          - model
+          - training
+          - tuning
+          - baselines
+          - threshold
+    outs:
+      - artifacts/model_trainer
+
+  evaluate:
+    # Scores the candidate on the test set and, if it beats production, registers it in
+    # MLflow and exports the serving bundle (artifacts/serving).
+    cmd: uv run hc-train --stage evaluate
+    deps:
+      - artifacts/data_ingestion
+      - artifacts/data_validation
+      - artifacts/model_trainer
+      - src/hotel_cancellation/components/model_evaluation.py
+      - src/hotel_cancellation/components/model_registry.py
+    params:
+      - configs/params.yaml:
+          - evaluation
+    metrics:
+      - artifacts/model_evaluation/metrics.json:
+          cache: false

@@ -1,10 +1,16 @@
-.PHONY: install train serve test lint format drift mlflow docker-up clean
+.PHONY: install train repro registry serve test lint format drift mlflow docker-up clean
 
 install:  ## Install all dependencies
 	uv sync
 
 train:  ## Run the full training pipeline (ingest -> register)
 	uv run hc-train
+
+repro:  ## Re-run only the DVC stages whose code, params or data changed
+	uv run dvc repro
+
+registry:  ## List model versions in the MLflow registry
+	uv run hc-registry list
 
 serve:  ## Start the API + web UI on http://127.0.0.1:8000
 	uv run uvicorn api.main:app --reload
@@ -24,7 +30,7 @@ drift:  ## Check a CSV for drift: make drift FILE=path/to/bookings.csv
 mlflow:  ## Browse logged training runs
 	uv run mlflow ui --backend-store-uri sqlite:///mlruns/mlflow.db
 
-docker-up:  ## Build and run the serving container (train first)
+docker-up:  ## Build and run the serving container (train first: the bundle is baked in)
 	docker compose up --build
 
 clean:  ## Remove generated artifacts and logs (keeps the raw data)

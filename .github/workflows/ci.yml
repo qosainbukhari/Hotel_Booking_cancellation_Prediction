@@ -16,8 +16,10 @@ jobs:
           version: "0.13.5"
           enable-cache: true
 
-      - name: Install dependencies (runtime + dev, no training extras)
-        run: uv sync --frozen --no-default-groups --group dev
+      # Tests run the real pipeline (MLflow registry, Optuna, Pandera, Evidently), so CI
+      # installs the dev and train groups. The Docker image installs runtime packages only.
+      - name: Install dependencies
+        run: uv sync --frozen
 
       - name: Lint
         run: |
@@ -26,3 +28,5 @@ jobs:
 
       - name: Test
         run: uv run --no-sync pytest --cov=hotel_cancellation --cov=api --cov-report=term-missing
+        env:
+          MLFLOW_DISABLE_AGENT_HINT: "1"

@@ -1,0 +1,176 @@
+schema: '2.0'
+stages:
+  ingest:
+    cmd: uv run hc-train --stage ingest
+    deps:
+    - path: configs/schema.yaml
+      hash: md5
+      md5: 16eebe10f0699a529b3cf6a1da3a8363
+      size: 3295
+    - path: data/raw/hotel_bookings.csv
+      hash: md5
+      md5: 5bf588c5a949443e021fb7c847d31b27
+      size: 16855599
+    - path: src/hotel_cancellation/components/data_ingestion.py
+      hash: md5
+      md5: 317fea4fd1a01e09e4e95ed1c6ff7fcc
+      size: 2802
+    params:
+      configs/params.yaml:
+        data_split.test_size: 0.2
+    outs:
+    - path: artifacts/data_ingestion
+      hash: md5
+      md5: 378624b05d1a3b414dcb535d7e0531ba.dir
+      size: 13283469
+      nfiles: 2
+  validate:
+    cmd: uv run hc-train --stage validate
+    deps:
+    - path: artifacts/data_ingestion
+      hash: md5
+      md5: 378624b05d1a3b414dcb535d7e0531ba.dir
+      size: 13283469
+      nfiles: 2
+    - path: configs/schema.yaml
+      hash: md5
+      md5: 16eebe10f0699a529b3cf6a1da3a8363
+      size: 3295
+    - path: src/hotel_cancellation/components/data_validation.py
+      hash: md5
+      md5: bb26c57a5f8b80342bda1d7e5f7efe63
+      size: 6828
+    - path: src/hotel_cancellation/monitoring/drift.py
+      hash: md5
+      md5: 06df929ceac174dd2f24da2fa46e2448
+      size: 5764
+    params:
+      configs/params.yaml:
+        data_validation:
+          max_invalid_fraction: 0.01
+          evidently_sample_size: 20000
+        monitoring:
+          n_bins: 10
+          psi_threshold: 0.2
+          drift_share_threshold: 0.3
+    outs:
+    - path: artifacts/data_validation
+      hash: md5
+      md5: 341bc3dd10297ec88de9b530ccc2b1bf.dir
+      size: 4739769
+      nfiles: 3
+  transform:
+    cmd: uv run hc-train --stage transform
+    deps:
+    - path: artifacts/data_ingestion
+      hash: md5
+      md5: 378624b05d1a3b414dcb535d7e0531ba.dir
+      size: 13283469
+      nfiles: 2
+    - path: configs/schema.yaml
+      hash: md5
+      md5: 16eebe10f0699a529b3cf6a1da3a8363
+      size: 3295
+    - path: src/hotel_cancellation/components/data_transformation.py
+      hash: md5
+      md5: dc7f91d8baa4ac95a5e9f7c0afc2bfc5
+      size: 4253
+    params:
+      configs/params.yaml:
+        preprocessing:
+          min_category_frequency: 50
+    outs:
+    - path: artifacts/data_transformation
+      hash: md5
+      md5: 652f45c574aa800d62fb49689012d4c6.dir
+      size: 12557
+      nfiles: 1
+  train:
+    cmd: uv run hc-train --stage train
+    deps:
+    - path: artifacts/data_ingestion
+      hash: md5
+      md5: 378624b05d1a3b414dcb535d7e0531ba.dir
+      size: 13283469
+      nfiles: 2
+    - path: artifacts/data_transformation
+      hash: md5
+      md5: 652f45c574aa800d62fb49689012d4c6.dir
+      size: 12557
+      nfiles: 1
+    - path: src/hotel_cancellation/components/model_trainer.py
+      hash: md5
+      md5: a3939c69b204ca2f90be37b7c0120454
+      size: 8974
+    params:
+      configs/params.yaml:
+        baselines:
+          logistic_regression:
+            C: 1.0
+            max_iter: 2000
+          random_forest:
+            n_estimators: 300
+            min_samples_leaf: 3
+        data_split.validation_size: 0.15
+        model:
+          n_estimators: 2000
+          learning_rate: 0.05
+          max_depth: 8
+          min_child_weight: 1
+          subsample: 0.8
+          colsample_bytree: 0.8
+          reg_lambda: 1.0
+          tree_method: hist
+          n_jobs: -1
+          random_state: 42
+        threshold:
+          cost_false_negative: 100
+          cost_false_positive: 20
+        training:
+          early_stopping_rounds: 100
+          refit_on_full_train: true
+        tuning:
+          n_trials: 30
+          early_stopping_rounds: 50
+    outs:
+    - path: artifacts/model_trainer
+      hash: md5
+      md5: f289ce649ce31612afd1a7116f11471f.dir
+      size: 203714172
+      nfiles: 4
+  evaluate:
+    cmd: uv run hc-train --stage evaluate
+    deps:
+    - path: artifacts/data_ingestion
+      hash: md5
+      md5: 378624b05d1a3b414dcb535d7e0531ba.dir
+      size: 13283469
+      nfiles: 2
+    - path: artifacts/data_validation
+      hash: md5
+      md5: 341bc3dd10297ec88de9b530ccc2b1bf.dir
+      size: 4739769
+      nfiles: 3
+    - path: artifacts/model_trainer
+      hash: md5
+      md5: f289ce649ce31612afd1a7116f11471f.dir
+      size: 203714172
+      nfiles: 4
+    - path: src/hotel_cancellation/components/model_evaluation.py
+      hash: md5
+      md5: 02d5ae2adc036463f8cda7384e6c9a3a
+      size: 6875
+    - path: src/hotel_cancellation/components/model_registry.py
+      hash: md5
+      md5: 0de5ad3b01d17bf4dbf6e81bd9b7d270
+      size: 9759
+    params:
+      configs/params.yaml:
+        evaluation:
+          min_roc_auc: 0.75
+          min_improvement: 0.002
+    outs:
+    - path: artifacts/model_evaluation/metrics.json
+      hash: md5
+      md5: 49908703586c19347708cb5d2bf117fb
+      size: 1331

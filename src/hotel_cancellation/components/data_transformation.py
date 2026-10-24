@@ -20,7 +20,6 @@ logger = get_logger(__name__)
 CATEGORY_COLUMNS = (
     "hotel",
     "meal",
-    "country",
     "market_segment",
     "distribution_channel",
     "reserved_room_type",

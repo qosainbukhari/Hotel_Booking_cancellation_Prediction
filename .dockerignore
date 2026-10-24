@@ -1,10 +1,15 @@
 .venv
 .git
+.dvc
 **/__pycache__
 .pytest_cache
 .ruff_cache
 data
-artifacts
 mlruns
 logs
 tests
+notebooks
+docs
+# Only the serving bundle is needed from the training outputs.
+artifacts/*
+!artifacts/serving

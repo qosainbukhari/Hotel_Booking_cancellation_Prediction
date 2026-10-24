@@ -2,9 +2,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import Booking, app, get_predictor, validation_settings
-from hotel_cancellation.components.model_registry import ModelRegistry
 from hotel_cancellation.pipeline.prediction_pipeline import PredictionPipeline
 from hotel_cancellation.pipeline.training_pipeline import TrainingPipeline
+from tests.conftest import make_bookings, make_config
 
 EXAMPLE = Booking.model_config["json_schema_extra"]["example"]
 
@@ -14,10 +14,18 @@ def csv_bytes(bookings):
     return bookings.head(300).to_csv(index=False).encode()
 
 
-@pytest.fixture
-def client(config_manager):
+@pytest.fixture(scope="module")
+def trained_config(tmp_path_factory):
+    """Train once for the whole module; the API tests only read the serving bundle."""
+    config_manager = make_config(tmp_path_factory.mktemp("api"), make_bookings())
     TrainingPipeline(config_manager).run()
-    predictor = PredictionPipeline(ModelRegistry(config_manager.get_model_registry_config()))
+    return config_manager
+
+
+@pytest.fixture
+def client(trained_config):
+    config_manager = trained_config
+    predictor = PredictionPipeline(config_manager.get_model_registry_config().serving_dir)
     settings = config_manager.get_data_validation_config()
     app.dependency_overrides[get_predictor] = lambda: predictor
     app.dependency_overrides[validation_settings] = lambda: settings
@@ -34,7 +42,8 @@ def test_health(client):
 
 def test_model_info(client):
     body = client.get("/model").json()
-    assert body["version"] == "v1"
+    assert body["version"] == "1"
+    assert body["costs"] == {"false_negative": 100.0, "false_positive": 20.0}
     assert 0 < body["threshold"] < 1
 
 
@@ -43,7 +52,7 @@ def test_predict_single(client):
     assert response.status_code == 200
     body = response.json()
     assert 0 <= body["cancel_probability"] <= 1
-    assert body["model_version"] == "v1"
+    assert body["model_version"] == "1"
     assert body["explanation"] is None
 
 
@@ -53,7 +62,7 @@ def test_predict_with_explanation(client):
 
 
 def test_predict_batch(client):
-    other = {**EXAMPLE, "deposit_type": "Non Refund", "country": None, "agent": None}
+    other = {**EXAMPLE, "deposit_type": "Non Refund", "agent": None}
     response = client.post("/predict/batch", json={"bookings": [EXAMPLE, other]})
     assert response.status_code == 200
     assert len(response.json()["predictions"]) == 2
@@ -65,7 +74,9 @@ def test_predict_batch(client):
         {"hotel": "Motel"},
         {"lead_time": -1},
         {"arrival_date_month": "Smarch"},
-        {"reservation_status": "Canceled"},  # leaking field is rejected
+        {"reservation_status": "Canceled"},  # leaking fields are rejected
+        {"country": "PRT"},
+        {"required_car_parking_spaces": 1},
     ],
 )
 def test_invalid_booking_is_rejected(client, change):
@@ -87,8 +98,8 @@ def test_frontend_is_served(client):
 
 def test_model_versions(client):
     body = client.get("/model/versions").json()
-    assert body["production"] == "v1"
-    assert [v["version"] for v in body["versions"]] == ["v1"]
+    assert body["production"] == "1"
+    assert [v["version"] for v in body["versions"]] == ["1"]
 
 
 def test_predict_csv_with_labels_reports_metrics(client, csv_bytes):
@@ -98,6 +109,7 @@ def test_predict_csv_with_labels_reports_metrics(client, csv_bytes):
     assert body["n_rows"] == 300 == len(body["rows"])
     assert sum(body["histogram"]) == 300
     assert 0 <= body["metrics"]["roc_auc"] <= 1
+    assert "cost_per_booking" in body["metrics"]
     assert {"row", "cancel_probability", "will_cancel", "actual"} <= body["rows"][0].keys()
 
 
@@ -122,5 +134,5 @@ def test_drift_report(client, csv_bytes):
     response = client.post("/monitoring/drift", files={"file": ("b.csv", csv_bytes)})
     assert response.status_code == 200
     body = response.json()
-    assert body["model_version"] == "v1"
+    assert body["model_version"] == "1"
     assert body["n_features"] > 0 and "dataset_drift" in body

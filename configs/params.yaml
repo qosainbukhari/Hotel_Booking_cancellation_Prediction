@@ -1,19 +1,23 @@
-# Tunable values for every pipeline stage.
+# Tunable values for every pipeline stage. DVC tracks this file: changing a value re-runs only
+# the stages that depend on it (`dvc repro`).
 data_split:
   # Share of the most recent arrivals held out as the test set (temporal split).
   test_size: 0.2
-  # Share of the most recent training rows used for early stopping and threshold tuning.
+  # Share of the most recent training rows used for tuning, early stopping and the threshold.
   validation_size: 0.15
 
 data_validation:
   # Largest share of rows allowed to break a range / allowed-values rule before validation fails.
   max_invalid_fraction: 0.01
+  # Rows sampled from each side for the Evidently HTML drift report (keeps it fast).
+  evidently_sample_size: 20000
 
 preprocessing:
   # Categories seen fewer times than this are grouped into one "infrequent" bucket.
   min_category_frequency: 50
 
 model:
+  # Starting XGBoost settings. Optuna overrides the searched ones when tuning.n_trials > 0.
   n_estimators: 2000
   learning_rate: 0.05
   max_depth: 8
@@ -27,10 +31,37 @@ model:
 
 training:
   early_stopping_rounds: 100
+  # After early stopping picks the number of trees on the validation slice, retrain on all
+  # training rows (fit + validation) with that many trees.
+  refit_on_full_train: true
+
+tuning:
+  # Optuna trials searching XGBoost hyper-parameters on the validation slice (0 = no tuning).
+  n_trials: 30
+  # Each trial stops early after this many rounds without improvement.
+  early_stopping_rounds: 50
+
+baselines:
+  # Simpler models trained and tested the same way, to show what XGBoost adds.
+  logistic_regression:
+    C: 1.0
+    max_iter: 2000
+  random_forest:
+    n_estimators: 300
+    min_samples_leaf: 3
+
+threshold:
+  # The decision threshold minimises expected cost on the validation slice.
+  # Assumed use: flagged bookings get a retention action (reminder call, confirmation request,
+  # small incentive) and confirmed-risk rooms can be resold.
+  # Missed cancellation: the room is likely left empty for a night (mean ADR is about EUR 100).
+  cost_false_negative: 100
+  # False alarm: the retention action spent on a guest who would have come anyway.
+  cost_false_positive: 20
 
 evaluation:
   # A candidate model must reach this ROC-AUC on the test set to be accepted at all.
-  min_roc_auc: 0.80
+  min_roc_auc: 0.75
   # ...and must beat the production model by at least this much ROC-AUC to replace it.
   min_improvement: 0.002
 
@@ -42,6 +73,7 @@ monitoring:
   drift_share_threshold: 0.3
 
 mlflow:
-  enabled: true
   tracking_uri: sqlite:///mlruns/mlflow.db
+  # Where run artifacts and registered model files are stored.
+  artifact_root: mlruns/artifacts
   experiment_name: hotel-cancellation

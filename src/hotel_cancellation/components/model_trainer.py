@@ -1,12 +1,20 @@
 from datetime import UTC, datetime
+from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import precision_recall_curve
+from sklearn.base import clone
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
-from hotel_cancellation.components.model_evaluation import classification_metrics
+from hotel_cancellation.components.model_evaluation import (
+    classification_metrics,
+    cost_optimal_threshold,
+)
 from hotel_cancellation.entity.artifact_entity import (
     DataIngestionArtifact,
     DataTransformationArtifact,
@@ -19,20 +27,30 @@ from hotel_cancellation.utils.common import load_object, save_object, split_tail
 
 logger = get_logger(__name__)
 
+TUNING_MAX_TREES = 1000
 
-def best_f1_threshold(y_true: np.ndarray, proba: np.ndarray) -> float:
-    """Probability cut-off that gives the highest F1 score."""
-    precision, recall, thresholds = precision_recall_curve(y_true, proba)
-    f1 = 2 * precision * recall / np.clip(precision + recall, 1e-12, None)
-    # The last precision / recall pair has no threshold.
-    return float(thresholds[int(np.argmax(f1[:-1]))])
+
+def make_xgb(params: dict[str, Any], early_stopping_rounds: int | None = None) -> XGBClassifier:
+    return XGBClassifier(
+        **params,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        early_stopping_rounds=early_stopping_rounds,
+    )
 
 
 class ModelTrainer:
-    """Train XGBoost with early stopping on the most recent slice of the training data.
+    """Train XGBoost (optionally tuned with Optuna) plus two baseline models.
 
-    The saved model is one sklearn Pipeline (preprocessing + XGBoost) that takes raw booking
-    rows, plus a metadata file with the tuned decision threshold.
+    Every model follows the same recipe so the comparison is fair:
+
+    1. fit on the older part of the training data,
+    2. choose the decision threshold on the newest slice (validation) by minimising cost,
+    3. refit on all training rows (fit + validation).
+
+    For XGBoost, step 1 also tunes hyper-parameters and picks the number of trees by early
+    stopping on the validation slice. Each saved model is one sklearn Pipeline (preprocessing +
+    estimator) that takes raw booking rows.
     """
 
     def __init__(self, config: ModelTrainerConfig) -> None:
@@ -49,46 +67,146 @@ class ModelTrainer:
         X_fit = preprocessor.transform(fit_df.drop(columns=[target]))
         X_val = preprocessor.transform(val_df.drop(columns=[target]))
         y_fit, y_val = fit_df[target].to_numpy(), val_df[target].to_numpy()
+        X_all, y_all = np.vstack([X_fit, X_val]), np.concatenate([y_fit, y_val])
+        logger.info("Fit rows %d, validation rows %d", len(y_fit), len(y_val))
 
-        model = XGBClassifier(
-            **self.config.model_params,
-            objective="binary:logistic",
-            eval_metric="logloss",
-            early_stopping_rounds=self.config.early_stopping_rounds,
-        )
-        logger.info("Training XGBoost on %d rows, validating on %d", len(y_fit), len(y_val))
+        params = dict(self.config.model_params)
+        tuning = None
+        if self.config.n_trials > 0:
+            best_params, tuning = self._tune(params, X_fit, y_fit, X_val, y_val)
+            params.update(best_params)
+
         try:
-            model.fit(X_fit, y_fit, eval_set=[(X_val, y_val)], verbose=False)
+            selector = make_xgb(params, self.config.early_stopping_rounds)
+            selector.fit(X_fit, y_fit, eval_set=[(X_val, y_val)], verbose=False)
         except Exception as error:
             raise ModelError(f"Model training failed: {error}") from error
-
-        val_proba = model.predict_proba(X_val)[:, 1]
-        threshold = best_f1_threshold(y_val, val_proba)
-        val_metrics = classification_metrics(y_val, val_proba, threshold)
+        n_trees = int(selector.best_iteration) + 1
+        val_proba = selector.predict_proba(X_val)[:, 1]
+        threshold = cost_optimal_threshold(y_val, val_proba, self.config.costs)
+        val_metrics = classification_metrics(y_val, val_proba, threshold, self.config.costs)
         logger.info(
-            "Best iteration %d, validation ROC-AUC %.4f, F1 %.4f at threshold %.3f",
-            model.best_iteration,
+            "XGBoost: %d trees, validation ROC-AUC %.4f, threshold %.3f (cost/booking %.2f)",
+            n_trees,
             val_metrics["roc_auc"],
-            val_metrics["f1"],
             threshold,
+            val_metrics["cost_per_booking"],
         )
 
-        pipeline = Pipeline([("preprocessor", preprocessor), ("model", model)])
-        save_object(self.config.model_path, pipeline)
-        metadata = {
-            "trained_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "threshold": threshold,
-            "best_iteration": int(model.best_iteration),
-            "n_train_rows": len(y_fit),
-            "n_validation_rows": len(y_val),
-            "validation_metrics": val_metrics,
-            "model_params": self.config.model_params,
-            "feature_names": transformation.feature_names,
-        }
-        write_json(self.config.metadata_path, metadata)
+        # Final model: a fixed number of trees and no early-stopping state, so prediction and
+        # SHAP explanations use exactly the same trees.
+        final_params = {**params, "n_estimators": n_trees}
+        X_final, y_final = (X_all, y_all) if self.config.refit_on_full_train else (X_fit, y_fit)
+        model = make_xgb(final_params).fit(X_final, y_final)
+        save_object(
+            self.config.model_path, Pipeline([("preprocessor", preprocessor), ("model", model)])
+        )
+
+        baselines, baseline_paths = {}, {}
+        for name, estimator in self._baselines().items():
+            estimator.fit(X_fit, y_fit)
+            proba = estimator.predict_proba(X_val)[:, 1]
+            b_threshold = cost_optimal_threshold(y_val, proba, self.config.costs)
+            baselines[name] = {
+                "threshold": b_threshold,
+                "validation_metrics": classification_metrics(
+                    y_val, proba, b_threshold, self.config.costs
+                ),
+            }
+            final = clone(estimator).fit(X_final, y_final)
+            path = self.config.baselines_dir / f"{name}.joblib"
+            save_object(path, Pipeline([("preprocessor", preprocessor), ("model", final)]))
+            baseline_paths[name] = path
+            logger.info(
+                "Baseline %s: validation ROC-AUC %.4f",
+                name,
+                baselines[name]["validation_metrics"]["roc_auc"],
+            )
+
+        write_json(
+            self.config.metadata_path,
+            {
+                "trained_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "threshold": threshold,
+                "threshold_rule": "minimum expected cost on the validation slice",
+                "costs": {
+                    "false_negative": self.config.costs.false_negative,
+                    "false_positive": self.config.costs.false_positive,
+                },
+                "n_trees": n_trees,
+                "refit_on_full_train": self.config.refit_on_full_train,
+                "n_train_rows": len(y_final),
+                "n_validation_rows": len(y_val),
+                "validation_metrics": val_metrics,
+                "model_params": final_params,
+                "tuning": tuning,
+                "baselines": baselines,
+                "feature_names": transformation.feature_names,
+            },
+        )
         return ModelTrainerArtifact(
             model_path=self.config.model_path,
             metadata_path=self.config.metadata_path,
             threshold=threshold,
             validation_metrics=val_metrics,
+            baseline_paths=baseline_paths,
         )
+
+    def _baselines(self) -> dict[str, Any]:
+        params = self.config.baseline_params
+        seed = self.config.model_params.get("random_state", 42)
+        return {
+            "logistic_regression": Pipeline(
+                [
+                    ("scale", StandardScaler()),
+                    ("model", LogisticRegression(**params["logistic_regression"])),
+                ]
+            ),
+            "random_forest": RandomForestClassifier(
+                **params["random_forest"], n_jobs=-1, random_state=seed
+            ),
+        }
+
+    def _tune(
+        self,
+        base: dict[str, Any],
+        X_fit: np.ndarray,
+        y_fit: np.ndarray,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Search XGBoost hyper-parameters with Optuna, maximising validation ROC-AUC."""
+        import optuna
+
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        def objective(trial: optuna.Trial) -> float:
+            params = {
+                **base,
+                "n_estimators": TUNING_MAX_TREES,
+                "max_depth": trial.suggest_int("max_depth", 3, 10),
+                "learning_rate": trial.suggest_float("learning_rate", 0.02, 0.3, log=True),
+                "min_child_weight": trial.suggest_float("min_child_weight", 1, 20, log=True),
+                "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
+                "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10, log=True),
+                "gamma": trial.suggest_float("gamma", 0.0, 5.0),
+            }
+            model = make_xgb(params, self.config.tuning_early_stopping_rounds)
+            model.fit(X_fit, y_fit, eval_set=[(X_val, y_val)], verbose=False)
+            return float(roc_auc_score(y_val, model.predict_proba(X_val)[:, 1]))
+
+        sampler = optuna.samplers.TPESampler(seed=base.get("random_state", 42))
+        study = optuna.create_study(direction="maximize", sampler=sampler)
+        logger.info("Tuning XGBoost with Optuna (%d trials)", self.config.n_trials)
+        study.optimize(objective, n_trials=self.config.n_trials)
+        logger.info(
+            "Best trial %d: validation ROC-AUC %.4f", study.best_trial.number, study.best_value
+        )
+        summary = {
+            "n_trials": len(study.trials),
+            "best_trial": study.best_trial.number,
+            "best_validation_roc_auc": study.best_value,
+            "best_params": study.best_params,
+        }
+        return study.best_params, summary
