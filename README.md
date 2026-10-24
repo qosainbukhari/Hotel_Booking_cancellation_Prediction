@@ -1,18 +1,68 @@
-# Hotel Cancellation Prediction
-
-Predicts whether a hotel booking will be cancelled, using the
-[Hotel Booking Demand](https://www.sciencedirect.com/science/article/pii/S2352340918315191) dataset
-(119,390 bookings from a city hotel and a resort hotel in Portugal, July 2015 – August 2017).
+# Cancellation Radar: Hotel Booking Cancellation Prediction
 
 **Live demo: [cancellation-radar.vercel.app](https://cancellation-radar.vercel.app)**: web UI,
 with the API reference at [/docs](https://cancellation-radar.vercel.app/docs).
 
-The project covers the whole lifecycle: leakage analysis, data validation (Pandera), a DVC
-pipeline, Optuna tuning with baselines, a cost-based decision threshold, the MLflow Model
-Registry, SHAP explanations, drift monitoring (PSI + Evidently), a FastAPI service with a web
-UI, a multi-stage Docker image and CI.
-
 ![Single booking prediction with explanation](docs/images/predict.png)
+
+## The problem
+
+Hotels lose a lot of business to cancellations. In the
+[Hotel Booking Demand](https://www.sciencedirect.com/science/article/pii/S2352340918315191) data
+(119,390 bookings at a city hotel and a resort hotel in Portugal, July 2015 – August 2017):
+
+- **37% of bookings were cancelled**: 44,224 bookings, worth about **€16.7 million** in booked
+  room revenue.
+- Cancelled bookings were made much further ahead: the median lead time is 113 days, against
+  45 days for bookings that went ahead. A room cancelled late is hard to resell.
+- The usual defences are blunt. Overbooking every night risks turning away guests who do arrive.
+  Strict non-refundable deposits for everyone put customers off.
+
+The hotel needs to know **at the moment a booking is made** how likely it is to be cancelled,
+and whether it is worth doing something about it.
+
+## The solution
+
+A machine-learning service that scores every new booking and tells staff which ones to act on:
+
+- **A cancellation risk** (0–100%) for each booking, using only information known when the
+  booking is made.
+- **The reasons** behind each score (for example: long lead time and no special requests push
+  the risk up; past completed stays push it down).
+- **A flag / no-flag decision**, set by the business cost of each kind of mistake rather than a
+  fixed 50% cut-off.
+- **Batch scoring** of a whole booking list, and a **drift alarm** when new bookings stop
+  looking like the data the model learned from.
+
+Staff can then act on flagged bookings only: send a reminder or confirmation request, offer a
+small incentive, or count the room as likely to free up when deciding how far to overbook.
+
+**Results on bookings the model never saw** (the newest 20% of arrivals, 23,878 bookings):
+
+- It **catches 94% of cancellations**. About half of the flagged bookings really cancel, which
+  is acceptable because a reminder call is cheap.
+- **Cost of mistakes: €9.69 per booking instead of €40.86 with no model, a 76% reduction.** This
+  uses the assumed costs of €100 per missed cancellation and €20 per unnecessary action.
+- ROC-AUC 0.824 on future bookings, with no information leaking from after the booking.
+
+## Challenges and how they were solved
+
+| Challenge | Why it matters | Solution |
+|-----------|----------------|----------|
+| **Leaking columns** | Some columns are only filled in at check-in. They make the model look brilliant in testing and useless in practice | Proved from the data that `country` and `required_car_parking_spaces` leak, alongside four obvious ones. All six are dropped at ingestion, and the API rejects them. Honest ROC-AUC: 0.875 → 0.824 |
+| **Realistic testing** | A random split mixes past and future bookings and overstates the score (0.906 against 0.827) | Train on older arrivals and test on the newest 20%, as the model will be used |
+| **When to flag** | A missed cancellation (an empty room) costs far more than an unneeded reminder call. F1 treats both mistakes the same | The threshold minimises expected cost on a validation slice: 0.12, not 0.5. Change the costs in `params.yaml` and it moves |
+| **Which model** | "Why XGBoost?" needs evidence | Logistic Regression and Random Forest trained and tested the same way. Both tree models beat Logistic Regression (0.82–0.83 against 0.80) and are within 0.005 of each other |
+| **Trust** | Staff won't act on a score they can't explain | Per-booking SHAP explanations in the API and UI |
+| **The data keeps changing** | Seasons, prices and channels shift, and accuracy drops quietly | PSI drift checks in the API and CLI, plus an Evidently report on every training run |
+| **Safe updates** | A retrained model can be worse than the live one | MLflow Model Registry: a new version goes live only if it beats production on the same test set, and rollback is one command |
+| **Shipping it** | Training tools are too heavy for hosting (Vercel caps functions at 500 MB) | A lean serving bundle with no MLflow or training tools: about 290 MB on Vercel, plus a multi-stage Docker image with the model built in |
+
+### What's inside
+
+Leakage analysis, Pandera data validation, a DVC pipeline, Optuna tuning with baselines, a
+cost-based threshold, MLflow tracking and Model Registry, SHAP explanations, PSI + Evidently
+drift monitoring, a FastAPI service with a web UI, Docker, Vercel and GitHub Actions CI.
 
 ## Quick start
 
@@ -25,7 +75,7 @@ uv run uvicorn api.main:app  # open http://127.0.0.1:8000
 
 Or use `make install train serve`.
 
-## Results
+## Detailed results
 
 Test set: the most recent 20% of arrivals (23,878 bookings from 22 Apr 2017). Every model is fit
 on older bookings, has its threshold chosen on the newest 15% of the training data, and is
