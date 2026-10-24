@@ -1,0 +1,82 @@
+# Expected shape of the raw booking data and the features the model uses.
+target: is_canceled
+
+# Columns that leak the outcome (they are only known at check-in or after a cancellation).
+# They are dropped right after ingestion so no later stage can use them by accident.
+leakage_columns:
+  - reservation_status
+  - reservation_status_date
+  - assigned_room_type
+  - booking_changes
+
+# Raw input columns. type is "numeric" or "category"; min / max / allowed are row-level rules.
+columns:
+  hotel: {type: category, allowed: [City Hotel, Resort Hotel]}
+  is_canceled: {type: numeric, allowed: [0, 1]}
+  lead_time: {type: numeric, min: 0}
+  arrival_date_year: {type: numeric, min: 2000}
+  arrival_date_month:
+    type: category
+    allowed: [January, February, March, April, May, June, July, August, September, October,
+              November, December]
+  arrival_date_week_number: {type: numeric, min: 1, max: 53}
+  arrival_date_day_of_month: {type: numeric, min: 1, max: 31}
+  stays_in_weekend_nights: {type: numeric, min: 0}
+  stays_in_week_nights: {type: numeric, min: 0}
+  adults: {type: numeric, min: 0}
+  children: {type: numeric, min: 0, nullable: true}
+  babies: {type: numeric, min: 0}
+  meal: {type: category, allowed: [BB, FB, HB, SC, Undefined]}
+  country: {type: category, nullable: true}
+  market_segment:
+    type: category
+    allowed: [Aviation, Complementary, Corporate, Direct, Groups, Offline TA/TO, Online TA,
+              Undefined]
+  distribution_channel: {type: category, allowed: [Corporate, Direct, GDS, TA/TO, Undefined]}
+  is_repeated_guest: {type: numeric, allowed: [0, 1]}
+  previous_cancellations: {type: numeric, min: 0}
+  previous_bookings_not_canceled: {type: numeric, min: 0}
+  reserved_room_type: {type: category, allowed: [A, B, C, D, E, F, G, H, L, P]}
+  deposit_type: {type: category, allowed: [No Deposit, Non Refund, Refundable]}
+  agent: {type: numeric, nullable: true}
+  company: {type: numeric, nullable: true}
+  days_in_waiting_list: {type: numeric, min: 0}
+  customer_type: {type: category, allowed: [Contract, Group, Transient, Transient-Party]}
+  adr: {type: numeric, min: 0}
+  required_car_parking_spaces: {type: numeric, min: 0}
+  total_of_special_requests: {type: numeric, min: 0}
+
+# Model inputs after feature engineering (see components/data_transformation.py).
+features:
+  numerical:
+    - lead_time
+    - arrival_month
+    - arrival_date_week_number
+    - arrival_date_day_of_month
+    - arrival_weekday
+    - stays_in_weekend_nights
+    - stays_in_week_nights
+    - total_nights
+    - adults
+    - children
+    - babies
+    - total_guests
+    - is_repeated_guest
+    - previous_cancellations
+    - previous_bookings_not_canceled
+    - days_in_waiting_list
+    - adr
+    - adr_per_guest
+    - required_car_parking_spaces
+    - total_of_special_requests
+    - has_company
+  categorical:
+    - hotel
+    - meal
+    - country
+    - market_segment
+    - distribution_channel
+    - reserved_room_type
+    - deposit_type
+    - customer_type
+    - agent

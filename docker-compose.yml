@@ -1,0 +1,10 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # The model registry produced by `uv run hc-train`. Retrain on the host, then press
+      # "Reload from registry" in the UI (or POST /model/reload) to pick up the new version.
+      - ./artifacts/model_registry:/app/artifacts/model_registry:ro
+    restart: unless-stopped

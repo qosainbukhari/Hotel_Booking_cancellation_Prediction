@@ -1,0 +1,16 @@
+
+# Data, outputs and logs (never in Git)
+data/
+artifacts/
+mlruns/
+logs/
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/

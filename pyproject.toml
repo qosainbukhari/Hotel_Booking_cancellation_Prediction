@@ -1,0 +1,62 @@
+[project]
+name = "hotel-cancellation"
+version = "0.1.0"
+description = "Predicts hotel booking cancellations with a production-grade ML pipeline"
+readme = "README.md"
+authors = [
+    { name = "Qosain", email = "bukhariqosain824@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.162.0",
+    "joblib>=1.6.0",
+    "numpy>=2.4.6",
+    "pandas>=2.2,<3",
+    "pydantic>=2.14.1",
+    "python-multipart>=0.0.32",
+    "pyyaml>=6.0.3",
+    "scikit-learn>=1.9.1",
+    "shap>=0.51.0",
+    "uvicorn[standard]>=0.54.0",
+    "xgboost-cpu>=3.2.0",
+]
+
+[project.scripts]
+hc-train = "hotel_cancellation.pipeline.training_pipeline:main"
+hc-drift = "hotel_cancellation.monitoring.drift:main"
+
+[build-system]
+requires = ["uv_build>=0.13.4,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "ipykernel>=7.4.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.2",
+]
+train = [
+    "dvc>=3.67.1",
+    "evidently>=0.7.23",
+    "matplotlib>=3.11.2",
+    "mlflow>=3.17.2",
+    "optuna>=5.0.0",
+    "pandera>=0.34.1",
+    "seaborn>=0.13.2",
+]
+
+[tool.uv]
+default-groups = ["dev", "train"]
+link-mode = "copy"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
