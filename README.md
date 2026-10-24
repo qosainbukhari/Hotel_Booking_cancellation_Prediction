@@ -68,6 +68,8 @@ src/hotel_cancellation/
   entity/                   dataclasses for stage configs and outputs
 api/main.py                 FastAPI service (JSON API + serves the web UI)
 frontend/                   web UI: plain HTML/CSS/JS, no build step, no CDN
+notebooks/
+  project_walkthrough.ipynb EDA, leakage/split experiment, test curves, explanations, drift
 tests/                      unit, API and end-to-end tests (synthetic data, no CSV needed)
 Dockerfile, docker-compose.yml, Makefile, .github/workflows/ci.yml
 ```
@@ -216,6 +218,36 @@ The train→test check already flags `arrival_month`, `arrival_date_week_number`
 `adr_per_guest`, `agent` and `lead_time`. That is expected: the test window is spring–summer
 2017, so seasonality and price changes show up. It is also the main reason test AUC is lower
 than validation AUC (0.875 vs 0.911).
+
+## Notebook
+
+`notebooks/project_walkthrough.ipynb` walks through the project with code and charts. It is saved
+with its outputs, so you can read it without running anything:
+
+1. **The data:** cancellation rates by hotel, deposit, market segment, lead time and month.
+2. **Leakage and the split:** the same model trained three ways.
+3. **The production model:** ROC and precision/recall curves, confusion matrix, calibration.
+4. **What drives predictions:** global TreeSHAP importance and one booking explained.
+5. **Drift:** PSI between the training and test periods.
+
+The leakage experiment shows what each choice is worth:
+
+| Setup | Test ROC-AUC |
+|-------|-------------:|
+| Random split + leaky columns | 0.954 |
+| Random split, no leakage | 0.948 |
+| Time split, no leakage (this project) | 0.882 |
+
+The calibration plot shows that on the test period, probabilities run low: bookings cancel more
+often than predicted, because of seasonal drift.
+
+To re-run it after `uv run hc-train`:
+
+```bash
+uv run --with jupyterlab jupyter lab notebooks/   # or open it in VS Code with the .venv kernel
+```
+
+It reads the raw data and the trained model but never writes to `artifacts/`.
 
 ## Docker
 
